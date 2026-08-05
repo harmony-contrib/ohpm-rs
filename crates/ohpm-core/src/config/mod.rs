@@ -324,8 +324,13 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
+    /// Serializes tests that mutate the global `OHPM_*` env (parallel tests
+    /// would otherwise race on `std::env`).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn precedence_env_over_user() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = TempDir::new().unwrap();
         // Force a deterministic user rc path via a temp HOME.
         let home = TempDir::new().unwrap();
@@ -340,6 +345,7 @@ mod tests {
 
     #[test]
     fn precedence_project_over_user() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();
         let cwd = project.path().join("module");
