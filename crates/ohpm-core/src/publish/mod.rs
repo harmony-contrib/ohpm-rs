@@ -1,0 +1,379 @@
+//! Publish orchestration, mirroring `lib/core/publish/PublishCore.js`.
+
+pub mod meta;
+pub mod uploader;
+pub mod validate;
+
+use std::path::{Path, PathBuf};
+
+use crate::archive;
+use crate::config::{default::types, Config};
+use crate::constants;
+use crate::error::{OhpmError, Result};
+use crate::package::{self, Manifest};
+use crate::registry::login::LoginOverrides;
+use crate::registry::{auth, RegistryClient};
+
+/// Everything the publish/prepublish flow needs from the caller.
+#[derive(Debug, Clone, Default)]
+pub struct PublishRequest {
+    /// Path to the `.har` or `.tgz` package.
+    pub file: String,
+    /// `--tag` option (defaults to `latest`).
+    pub tag: Option<String>,
+    /// `--publish_registry` option (overrides config).
+    pub publish_registry: Option<String>,
+    /// CLI overrides for the SSH login flow.
+    pub login: LoginOverrides,
+    /// `--timeout` in milliseconds (overrides config `fetch_timeout`).
+    pub timeout: Option<u64>,
+    /// The source directory of the published package. Used to resolve `file:`
+    /// dependencies in workspace mode (defaults to the current directory).
+    pub package_root: Option<PathBuf>,
+}
+
+/// Outcome of a successful publish, surfaced by the CLI.
+#[derive(Debug, Clone)]
+pub struct PublishOutcome {
+    pub name: String,
+    pub version: String,
+    pub additional_msg: Option<String>,
+}
+
+/// State gathered during validation, shared by publish and prepublish.
+struct PublishContext {
+    manifest: Manifest,
+    is_tgz: bool,
+    har_path: PathBuf,
+    hsp_path: Option<PathBuf>,
+    cache_dir: PathBuf,
+    size: u64,
+    registry: String,
+    tag: String,
+    login: LoginOverrides,
+}
+
+/// Run the full publish flow (validation + upload).
+pub async fn publish(client: &RegistryClient, config: &Config, req: &PublishRequest) -> Result<PublishOutcome> {
+    let ctx = validate_and_prepare(config, req, true).await?;
+    let outcome = do_publish(client, config, &ctx).await?;
+    cleanup(&ctx);
+    Ok(outcome)
+}
+
+/// Run validation only, without uploading. Like the reference `prepublish`,
+/// no registry is required.
+pub async fn prepublish(config: &Config, req: &PublishRequest) -> Result<PublishOutcome> {
+    let ctx = validate_and_prepare(config, req, false).await?;
+    let name = ctx.manifest.name.clone();
+    let version = ctx.manifest.version.clone();
+    cleanup(&ctx);
+    Ok(PublishOutcome {
+        name,
+        version,
+        additional_msg: None,
+    })
+}
+
+/// Shared validation for publish and prepublish.
+async fn validate_and_prepare(
+    config: &Config,
+    req: &PublishRequest,
+    need_registry: bool,
+) -> Result<PublishContext> {
+    // 1. path + tag validation
+    validate::valid_pkg_path(&req.file)?;
+    package::validate::validate_tag(req.tag.as_deref())?;
+
+    let file = Path::new(&req.file);
+    let is_tgz = archive::is_tgz_file(&req.file);
+
+    // 2. manifest
+    let (manifest, har_path, hsp_path, cache_dir) = get_manifest(config, file, is_tgz)?;
+
+    // 3. author fix
+    let mut manifest = manifest;
+
+    // 3a. `publish: false` packages cannot be published.
+    if !manifest.publishable() {
+        return Err(OhpmError::new(
+            "PublishForbidden",
+            format!(
+                "The package \"{}\" is marked \"publish: false\" and cannot be published.",
+                manifest.name
+            ),
+        ));
+    }
+
+    package::fix_author(&mut manifest)?;
+
+    // 3b. workspace mode: resolve `file:` dependencies before publishing so the
+    // uploaded metadata never references local paths.
+    let package_root = req
+        .package_root
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    if let Some(ws) = crate::workspace::Workspace::find(&package_root)? {
+        let n = crate::workspace::process_file_dependencies(&ws, &package_root, &mut manifest)?;
+        if n > 0 {
+            log::info!(
+                "workspace mode: rewrote {n} file: dependencies in \"{}\"",
+                manifest.name
+            );
+        }
+    }
+
+    // 4. publish registry (only publish needs one)
+    let registry = if need_registry {
+        get_publish_registry(config, req.publish_registry.as_deref())?
+    } else {
+        String::new()
+    };
+
+    // 5. package validation
+    let har_pkg = validate::get_pkg_content(&har_path)?;
+    validate::validate_pkg_size(&har_pkg)?;
+    validate::validate_manifest_basics(&manifest)?;
+
+    let mut hsp_pkg = None;
+    if is_tgz {
+        package::validate::validate_package_type_for_tgz(manifest.package_type())?;
+        let hsp = hsp_path.as_ref().ok_or_else(OhpmError::package_type_empty)?;
+        hsp_pkg = Some(validate::valid_hsp_content(hsp)?);
+    }
+
+    let size = har_pkg.size + hsp_pkg.as_ref().map(|p| p.size).unwrap_or(0);
+    let tag = req.tag.clone().unwrap_or_else(|| constants::LATEST.to_string());
+
+    Ok(PublishContext {
+        manifest,
+        is_tgz,
+        har_path,
+        hsp_path,
+        cache_dir,
+        size,
+        registry,
+        tag,
+        login: req.login.clone(),
+    })
+}
+
+async fn do_publish(
+    client: &RegistryClient,
+    config: &Config,
+    ctx: &PublishContext,
+) -> Result<PublishOutcome> {
+    // Build the metadata document.
+    let hsp_meta = match (&ctx.hsp_path, ctx.is_tgz) {
+        (Some(hsp), true) => {
+            let pkg = validate::get_pkg_content(hsp)?;
+            Some(meta::HspMeta {
+                integrity: pkg.integrity,
+                hsp_type: constants::HSP_TYPE_BUNDLE_APP.to_string(),
+            })
+        }
+        _ => None,
+    };
+    let har_pkg = validate::get_pkg_content(&ctx.har_path)?;
+    let meta_ctx = meta::MetaContext {
+        registry: ctx.registry.clone(),
+        tag: ctx.tag.clone(),
+        har_integrity: har_pkg.integrity,
+        hsp: hsp_meta,
+        har_abs: Some(ctx.har_path.clone()),
+    };
+    let mut metadata = meta::build_har_metadata(&ctx.manifest, &meta_ctx)?;
+
+    // Authentication: env/config token, or non-interactive SSH-key login.
+    let token = auth::resolve_write_token(client.http(), config, &ctx.registry, &ctx.login).await?;
+
+    // Upload with retry + stream->attachment fallback.
+    let threshold = config.get_number(types::USE_STREAM_THRESHOLD_SIZE).max(0) as u64;
+    let source = uploader::PackageSource {
+        har_path: &ctx.har_path,
+        hsp_path: ctx.hsp_path.as_deref(),
+        size_bytes: ctx.size,
+        is_tgz: ctx.is_tgz,
+    };
+    let result =
+        uploader::publish_package(client, &ctx.registry, &token, &mut metadata, &source, threshold)
+            .await?;
+
+    let additional_msg = result
+        .body
+        .get("additionalMsg")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string());
+
+    Ok(PublishOutcome {
+        name: ctx.manifest.name.clone(),
+        version: ctx.manifest.version.clone(),
+        additional_msg,
+    })
+}
+
+/// Determine the publish registry: `--publish_registry` > config
+/// `publish_registry`. Empty is an error (`getAndValidPublishRegistry`).
+pub fn get_publish_registry(config: &Config, cli_registry: Option<&str>) -> Result<String> {
+    let mut r = cli_registry.map(|s| s.to_string()).unwrap_or_default();
+    if r.is_empty() {
+        r = config.publish_registry();
+    }
+    if r.is_empty() {
+        return Err(OhpmError::publish_registry_error());
+    }
+    Ok(crate::config::ensure_trailing_slash(&r))
+}
+
+/// Load the manifest and extract the archive into a fresh cache directory.
+fn get_manifest(
+    config: &Config,
+    file: &Path,
+    is_tgz: bool,
+) -> Result<(Manifest, PathBuf, Option<PathBuf>, PathBuf)> {
+    let cache_dir = gen_cache_path(config);
+
+    if is_tgz {
+        let (har_entry, hsp_entry) = archive::hsp_detect(file)?.ok_or_else(|| {
+            OhpmError::invalid_tgz_file(&file.to_string_lossy())
+        })?;
+        archive::extract(file, &cache_dir, 0, Some(&[har_entry.clone(), hsp_entry.clone()]))?;
+        let har_path = cache_dir.join(&har_entry);
+        let hsp_path = cache_dir.join(&hsp_entry);
+        let har_cache = cache_dir.join(stem_name(&har_entry));
+        let manifest = package::read_manifest_from_archive(&har_path, &har_cache)?;
+        Ok((manifest, har_path, Some(hsp_path), cache_dir))
+    } else {
+        let har_path = file.to_path_buf();
+        let manifest = package::read_manifest_from_archive(file, &cache_dir)?;
+        Ok((manifest, har_path, None, cache_dir))
+    }
+}
+
+fn stem_name(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// `~/.ohpm/cache/harBall/<uuid>/`
+fn gen_cache_path(config: &Config) -> PathBuf {
+    let base = config.get_string(types::CACHE);
+    let base = if base.is_empty() {
+        crate::config::default::default_cache()
+    } else {
+        PathBuf::from(base)
+    };
+    let dir = base.join("harBall").join(uuid::Uuid::new_v4().simple().to_string());
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+fn cleanup(ctx: &PublishContext) {
+    let _ = std::fs::remove_dir_all(&ctx.cache_dir);
+}
+
+/// Unpublish request (`lib/core/publish/unpublish.js`).
+#[derive(Debug, Clone, Default)]
+pub struct UnpublishRequest {
+    /// `name[@version]`.
+    pub pkg: String,
+    /// Unpublish all versions without a specified version.
+    pub force: bool,
+    /// `--publish_registry` override.
+    pub publish_registry: Option<String>,
+    pub login: LoginOverrides,
+}
+
+/// Delete a package version (or all versions with `--force`) from the
+/// publish registry.
+pub async fn unpublish(
+    client: &RegistryClient,
+    config: &Config,
+    req: &UnpublishRequest,
+) -> Result<()> {
+    // Split "name[@version]"; the version separator is the first "@" after a
+    // leading "@" scope (mirroring the reference).
+    let (name, version) = split_pkg_name(&req.pkg);
+    validate_unpublish(&version, req.force)?;
+
+    let registry = get_publish_registry(config, req.publish_registry.as_deref())?;
+    let token = auth::resolve_write_token(client.http(), config, &registry, &req.login).await?;
+
+    let url = format!(
+        "{}{}",
+        registry,
+        crate::registry::url_encode_pkg_name(&name)
+    );
+    let body = serde_json::json!({ "version": version });
+
+    let resp = client
+        .http()
+        .delete(&url)
+        .header("command", "unpublish")
+        .header("version", "v1")
+        .header("user-agent", constants::user_agent())
+        .header("Authorization", token)
+        .header("Content-Type", "application/json; charset=UTF-8")
+        .body(serde_json::to_vec(&body)?)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(OhpmError::response_status(status.as_u16(), &text));
+    }
+    Ok(())
+}
+
+fn validate_unpublish(version: &str, force: bool) -> Result<()> {
+    if version.is_empty() && !force {
+        return Err(OhpmError::new(
+            "DeleteAllVersionPkgNotForce",
+            "A version must be specified to unpublish, or use the \"--force\" option to unpublish \
+             all versions.",
+        ));
+    }
+    Ok(())
+}
+
+/// Split `@scope/name@1.0.0` into `(@scope/name, 1.0.0)`.
+fn split_pkg_name(pkg: &str) -> (String, String) {
+    // The version separator is the first "@" after a leading "@" scope.
+    // For scoped names the search starts after the scope prefix, so +1.
+    let at_pos = if let Some(body) = pkg.strip_prefix('@') {
+        body.find('@').map(|i| i + 1).unwrap_or(usize::MAX)
+    } else {
+        pkg.find('@').unwrap_or(usize::MAX)
+    };
+    if at_pos < pkg.len() {
+        (pkg[..at_pos].to_string(), pkg[at_pos + 1..].to_string())
+    } else {
+        (pkg.to_string(), String::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_pkg_name_handles_scopes() {
+        assert_eq!(
+            split_pkg_name("@ohos/foo@1.0.0"),
+            ("@ohos/foo".to_string(), "1.0.0".to_string())
+        );
+        assert_eq!(split_pkg_name("com.example.foo"), ("com.example.foo".to_string(), String::new()));
+        assert_eq!(split_pkg_name("@ohos/foo"), ("@ohos/foo".to_string(), String::new()));
+    }
+
+    #[test]
+    fn unpublish_requires_version_or_force() {
+        assert!(validate_unpublish("1.0.0", false).is_ok());
+        assert!(validate_unpublish("", true).is_ok());
+        let err = validate_unpublish("", false).unwrap_err();
+        assert_eq!(err.code, "DeleteAllVersionPkgNotForce");
+    }
+}

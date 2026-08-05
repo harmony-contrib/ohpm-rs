@@ -1,0 +1,38 @@
+[package]
+name = "ohpm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core library reimplementing ohpm (OpenHarmony package manager) capabilities in Rust"
+
+[lib]
+name = "ohpm_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+json5.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+tar.workspace = true
+flate2.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rsa.workspace = true
+pkcs1.workspace = true
+rand.workspace = true
+uuid.workspace = true
+regex.workspace = true
+url.workspace = true
+log.workspace = true
+dirs.workspace = true
+glob.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tower.workspace = true
+tempfile.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "sync"] }

@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/ohpm-core", "crates/ohpm-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "ISC"
+repository = "https://gitee.com/openharmony/ohpm"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+json5 = "0.4"
+thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream", "http2"] }
+tar = "0.4"
+flate2 = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+base64 = "0.22"
+rsa = { version = "0.9", features = ["sha2", "pem", "pkcs5", "std"] }
+pkcs1 = "0.7"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
+regex = "1"
+url = "2"
+log = "0.4"
+dirs = "5"
+clap = { version = "4", features = ["derive"] }
+glob = "0.3"
+axum = "0.7"
+tower = "0.5"
+tempfile = "3"

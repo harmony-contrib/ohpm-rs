@@ -1,0 +1,19 @@
+[package]
+name = "ohpm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ohpm (OpenHarmony package manager) CLI reimplemented in Rust"
+
+[[bin]]
+name = "ohpm-rs"
+path = "src/main.rs"
+
+[dependencies]
+ohpm-core = { path = "../ohpm-core" }
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+json5.workspace = true
+log.workspace = true
