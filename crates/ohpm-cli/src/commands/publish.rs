@@ -30,7 +30,7 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
             passphrase: None, // publish only reads the passphrase from env/config
         },
         timeout: args.timeout,
-        package_root: package_source_root(),
+        package_root: package_source_root(&args.file),
     };
 
     let outcome = publish::publish(&client, &config, &req).await?;
@@ -41,10 +41,14 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
     Ok(())
 }
 
-/// The source root of the package being published: the nearest dir with
-/// `oh-package.json5` walking up from the cwd (used to resolve `file:`
-/// workspace dependencies).
-fn package_source_root() -> Option<std::path::PathBuf> {
+/// The source root of the package being published, used to resolve `file:`
+/// workspace dependencies. A directory input is its own source root;
+/// otherwise the nearest dir with `oh-package.json5` walking up from the cwd.
+fn package_source_root(input: &str) -> Option<std::path::PathBuf> {
+    let input_path = std::path::PathBuf::from(input);
+    if input_path.is_dir() {
+        return Some(input_path);
+    }
     let cwd = std::env::current_dir().ok()?;
     Some(ohpm_core::config::find_local_prefix(&cwd).unwrap_or(cwd))
 }

@@ -12,6 +12,7 @@ use axum::http::{Method, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{post, put};
 use axum::{Json, Router};
+use base64::Engine;
 use ohpm_core::config::Config;
 use ohpm_core::publish::{PublishRequest, publish};
 use ohpm_core::registry::login::LoginContext;
@@ -392,6 +393,59 @@ async fn publish_refuses_publish_false_package() {
     let err = publish(&client, &config, &req).await.unwrap_err();
     assert_eq!(err.code, "PublishForbidden");
     assert!(err.message.contains("publish: false"));
+}
+
+/// Publish accepts a source directory and packs it into a har first.
+#[tokio::test]
+async fn publish_from_source_directory() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvGuard::new();
+    let (registry, capture) = spawn_mock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+
+    // A source package directory with the usual structure.
+    std::fs::create_dir_all(dir.path().join("src/main/ets")).unwrap();
+    std::fs::write(
+        dir.path().join("oh-package.json5"),
+        "{ name: \"com.example.dirpkg\", version: \"1.0.0\", main: \"index.ets\" }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("index.ets"), "export {}\n").unwrap();
+    std::fs::write(dir.path().join("src/main/ets/a.ets"), "// a\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("oh_modules/x")).unwrap();
+    std::fs::write(dir.path().join("oh_modules/x/index.ets"), "// excluded\n").unwrap();
+
+    std::env::set_var("OHPM_ACCESS_TOKEN", "dir-token");
+    let config = load_config(dir.path());
+    let req = PublishRequest {
+        file: dir.path().to_string_lossy().into_owned(), // a directory!
+        publish_registry: Some(registry.clone()),
+        package_root: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    };
+    let client = RegistryClient::from_config(&config).unwrap();
+    publish(&client, &config, &req).await.expect("directory publish should succeed");
+
+    let cap = capture.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(cap.attachment.len(), 1);
+    let (_, meta) = &cap.attachment[0];
+    assert_eq!(meta["name"], "com.example.dirpkg");
+
+    // Decode the packed har attachment and verify its contents.
+    let data = meta["_attachments"]["com.example.dirpkg-1.0.0.har"]["data"]
+        .as_str()
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).unwrap();
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
+    let paths: Vec<String> = archive
+        .entries()
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert!(paths.iter().any(|p| p == "package/oh-package.json5"));
+    assert!(paths.iter().any(|p| p == "package/src/main/ets/a.ets"));
+    assert!(!paths.iter().any(|p| p.contains("oh_modules")), "pack excludes oh_modules");
 }
 
 /// The SSH login context can be built from config too (no env).

@@ -94,6 +94,34 @@ ohpm-rs publish my-lib.har
 ohpm-rs login --publish_id <id> --key_path /path/to/key.pem
 ```
 
+## Building HAR packages
+
+`ohpm-rs pack` builds a `<name>-<version>.har` from a source directory
+(npm-pack style):
+
+```sh
+# Pack the current package directory (nearest oh-package.json5).
+ohpm-rs pack
+
+# Pack a specific module; --output controls the destination dir.
+ohpm-rs pack native_ability --output dist/
+
+# Source directory → har → publish in one step.
+ohpm-rs publish native_ability --publish_registry https://repo.example.com/ohpm/
+```
+
+Packaging rules (hvigor conventions):
+
+- gzip tar with a `package/` prefix; entries sorted for deterministic output.
+- Always excluded: `oh_modules`, `node_modules`, `.hvigor`, `.git`, `.idea`,
+  `.ohpm`, `.tmp`, `.cxx`, `build`, `target`, `.DS_Store`, nested `*.har`,
+  `oh-package-lock.json5`.
+- A gitignore-style [`.ohpmignore`](https://developer.huawei.com/consumer/cn/forum/topic/0201145899734297171)
+  at the module root filters out additional files (`#` comments, `!` negation,
+  `* ? **` globs; a pattern without `/` also matches the file name at any
+  depth).
+- `publish`/`prepublish` accept a directory input and pack it first.
+
 ## Workspace mode
 
 A monorepo is identified by an **`ohpm-workspace.yaml`** at the workspace root

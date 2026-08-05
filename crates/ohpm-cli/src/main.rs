@@ -24,6 +24,7 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Publish(args) => commands::publish::run(&args).await,
         Command::Prepublish(args) => commands::prepublish::run(&args).await,
+        Command::Pack(args) => commands::pack::run(&args).await,
         Command::Init(args) => commands::init::run(&args).await,
         Command::Config(args) => commands::config::run(&args).await,
         Command::Login(args) => commands::login::run(&args).await,

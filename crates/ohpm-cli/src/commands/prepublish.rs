@@ -8,9 +8,14 @@ use crate::cli::PrepublishArgs;
 
 pub async fn run(args: &PrepublishArgs) -> Result<()> {
     let config = load_config()?;
-    let package_root = std::env::current_dir()
-        .ok()
-        .map(|cwd| ohpm_core::config::find_local_prefix(&cwd).unwrap_or(cwd));
+    let input = std::path::PathBuf::from(&args.file);
+    let package_root = if input.is_dir() {
+        Some(input)
+    } else {
+        std::env::current_dir()
+            .ok()
+            .map(|cwd| ohpm_core::config::find_local_prefix(&cwd).unwrap_or(cwd))
+    };
     let req = PublishRequest {
         file: args.file.clone(),
         package_root,

@@ -35,4 +35,5 @@ glob.workspace = true
 axum.workspace = true
 tower.workspace = true
 tempfile.workspace = true
+base64.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "sync"] }

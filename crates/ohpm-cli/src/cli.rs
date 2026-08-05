@@ -15,6 +15,8 @@ pub enum Command {
     Publish(PublishArgs),
     /// Pre-verify package content without publishing.
     Prepublish(PrepublishArgs),
+    /// Build a har package from a source directory.
+    Pack(PackArgs),
     /// Create an oh-package.json5 file.
     Init(InitArgs),
     /// Manage the ohpm configuration file.
@@ -61,9 +63,20 @@ pub struct PublishArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct PrepublishArgs {
-    /// The har or tgz package file.
+    /// The har or tgz package file (or a source directory).
     #[arg(value_name = "har_or_tgz_file")]
     pub file: String,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PackArgs {
+    /// Source directory containing oh-package.json5 (defaults to the current
+    /// package directory).
+    #[arg(value_name = "source_dir")]
+    pub source: Option<String>,
+    /// Output directory for the har (defaults to the current directory).
+    #[arg(long)]
+    pub output: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]

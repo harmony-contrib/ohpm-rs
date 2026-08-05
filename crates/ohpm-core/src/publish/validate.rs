@@ -23,10 +23,11 @@ pub struct PkgContent {
     pub entry_count: usize,
 }
 
-/// Validate that a package path points to a file (not a directory / missing).
+/// Validate that a package path exists. A directory is allowed (it is packed
+/// into a har first); missing or empty paths are rejected.
 pub fn valid_pkg_path(path: &str) -> Result<()> {
     let p = Path::new(path);
-    if path.is_empty() || !p.exists() || p.is_dir() {
+    if path.is_empty() || !p.exists() {
         return Err(OhpmError::pkg_empty());
     }
     Ok(())

@@ -5,8 +5,8 @@ members = ["crates/ohpm-core", "crates/ohpm-cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "ISC"
-repository = "https://gitee.com/openharmony/ohpm"
+license = "UNLICENSED"
+repository = "https://github.com/harmony-contrib/ohpm-rs"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -47,6 +47,8 @@ struct PublishContext {
     har_path: PathBuf,
     hsp_path: Option<PathBuf>,
     cache_dir: PathBuf,
+    /// Cache dir holding an auto-packed har for directory inputs.
+    extra_cache: Option<PathBuf>,
     size: u64,
     registry: String,
     tag: String,
@@ -85,11 +87,24 @@ async fn validate_and_prepare(
     validate::valid_pkg_path(&req.file)?;
     package::validate::validate_tag(req.tag.as_deref())?;
 
+    // 1b. a directory input is packed into a fresh har first.
     let file = Path::new(&req.file);
-    let is_tgz = archive::is_tgz_file(&req.file);
+    let (file, is_tgz, extra_cache) = if file.is_dir() {
+        let cache = gen_cache_path(config);
+        let outcome = crate::pack::pack(file, &cache)?;
+        log::info!(
+            "packed {} files from \"{}\" -> {}",
+            outcome.entry_count,
+            file.display(),
+            outcome.har_path.display()
+        );
+        (outcome.har_path, false, Some(cache))
+    } else {
+        (file.to_path_buf(), archive::is_tgz_file(&req.file), None)
+    };
 
     // 2. manifest
-    let (manifest, har_path, hsp_path, cache_dir) = get_manifest(config, file, is_tgz)?;
+    let (manifest, har_path, hsp_path, cache_dir) = get_manifest(config, &file, is_tgz)?;
 
     // 3. author fix
     let mut manifest = manifest;
@@ -151,6 +166,7 @@ async fn validate_and_prepare(
         har_path,
         hsp_path,
         cache_dir,
+        extra_cache,
         size,
         registry,
         tag,
@@ -272,6 +288,9 @@ fn gen_cache_path(config: &Config) -> PathBuf {
 
 fn cleanup(ctx: &PublishContext) {
     let _ = std::fs::remove_dir_all(&ctx.cache_dir);
+    if let Some(extra) = &ctx.extra_cache {
+        let _ = std::fs::remove_dir_all(extra);
+    }
 }
 
 /// Unpublish request (`lib/core/publish/unpublish.js`).

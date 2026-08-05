@@ -6,6 +6,7 @@ pub mod info;
 pub mod init;
 pub mod list;
 pub mod login;
+pub mod pack;
 pub mod ping;
 pub mod prepublish;
 pub mod publish;

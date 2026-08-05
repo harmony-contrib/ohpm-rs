@@ -8,6 +8,7 @@ pub mod archive;
 pub mod config;
 pub mod constants;
 pub mod error;
+pub mod pack;
 pub mod package;
 pub mod publish;
 pub mod registry;
