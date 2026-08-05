@@ -168,7 +168,7 @@ async fn validate_and_prepare(
 
     // 1b. a directory input is packed into a fresh har first.
     let file = Path::new(&req.file);
-    let (file, is_tgz, extra_cache) = if file.is_dir() {
+    let (file, is_tgz, mut extra_cache) = if file.is_dir() {
         let cache = gen_cache_path(config);
         let outcome = crate::pack::pack(file, &cache)?;
         log::info!(
@@ -183,7 +183,7 @@ async fn validate_and_prepare(
     };
 
     // 2. manifest
-    let (manifest, har_path, hsp_path, cache_dir) = get_manifest(config, &file, is_tgz)?;
+    let (manifest, mut har_path, hsp_path, cache_dir) = get_manifest(config, &file, is_tgz)?;
 
     // 3. author fix
     let mut manifest = manifest;
@@ -201,16 +201,13 @@ async fn validate_and_prepare(
 
     package::fix_author(&mut manifest)?;
 
-    // 3a. patch tool versions (`_nodeVersion`, `_ohpmVersion`) like the
-    // reference `patchManifest`; the registry requires `_ohpmVersion`.
-    package::patch_manifest(&mut manifest);
-
-    // 3b. workspace mode: resolve `file:` dependencies before publishing so the
+    // 3a. workspace mode: resolve `file:` dependencies before publishing so the
     // uploaded metadata never references local paths.
     let package_root = req
         .package_root
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mut rewritten_deps = 0usize;
     if let Some(ws) = crate::workspace::Workspace::find(&package_root)? {
         let n = crate::workspace::process_file_dependencies(&ws, &package_root, &mut manifest)?;
         if n > 0 {
@@ -219,7 +216,40 @@ async fn validate_and_prepare(
                 manifest.name
             );
         }
+        rewritten_deps = n;
     }
+
+    // 3b. When the workspace rewrite changed the dependencies, the packaged
+    // manifest must match the metadata — the registry rejects mismatched
+    // package data ("The OHPM package data does not match"). The extracted
+    // package is re-packed with the processed manifest. Tool-version/tag
+    // fields stay metadata-only, like the reference (patchManifest runs after
+    // this point).
+    if rewritten_deps > 0 {
+        // The extracted package content (plain har: the cache dir itself;
+        // tgz: the interface-har extraction dir).
+        let content_dir = manifest
+            .har_cache
+            .clone()
+            .unwrap_or_else(|| cache_dir.clone());
+        let manifest_text = serde_json::to_string_pretty(&manifest)?;
+        std::fs::write(
+            content_dir.join(constants::MY_PACKAGE_JSON),
+            format!("{manifest_text}\n"),
+        )?;
+        let repack_dir = extra_cache.get_or_insert_with(|| gen_cache_path(config));
+        let outcome = crate::pack::pack(&content_dir, repack_dir)?;
+        log::info!(
+            "re-packed {} files with the processed manifest -> {}",
+            outcome.entry_count,
+            outcome.har_path.display()
+        );
+        har_path = outcome.har_path;
+    }
+
+    // 3c. patch tool versions (`_nodeVersion`, `_ohpmVersion`) like the
+    // reference `patchManifest`; the registry requires `_ohpmVersion`.
+    package::patch_manifest(&mut manifest);
 
     // 4. publish registry (only publish needs one)
     let registry = if need_registry {

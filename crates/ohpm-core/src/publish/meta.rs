@@ -41,7 +41,11 @@ pub fn build_har_metadata(m: &Manifest, ctx: &MetaContext) -> Result<Value> {
     let mut doc = Map::new();
     doc.insert("_id".into(), json!(m.name));
     doc.insert("name".into(), json!(m.name));
-    doc.insert("packageType".into(), json!(m.package_type()));
+    // The reference spreads the manifest's packageType: absent when the
+    // manifest has none (an empty string would mismatch the package data).
+    if let Some(pt) = &m.package_type {
+        doc.insert("packageType".into(), json!(pt));
+    }
     doc.insert("description".into(), json!(m.description));
 
     let mut dist_tags = Map::new();
