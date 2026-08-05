@@ -58,16 +58,17 @@ All auth inputs are read from `OHPM_*` environment variables, which override
 | `OHPM_ACCESS_TOKEN` | Read-write access token — used directly, skips login. Highest priority. |
 | `OHPM_PUBLISH_ID` | Publish id for the SSH-key login flow. |
 | `OHPM_KEY_PATH` | Path to the encrypted private key for the login flow. |
+| `OHPM_KEY_CONTENT` | The private key PEM **content** directly — no file needed (CI secrets). Alternative to `OHPM_KEY_PATH`. |
 | `OHPM_KEY_PASSPHRASE` | Private-key passphrase. **No interactive prompt is ever shown.** |
 | `OHPM_READ_ACCESS_TOKEN` | Read-only token (used by `info` / `ping`). |
 | `OHPM_REGISTRY` | Default registry override. |
 | `OHPM_PUBLISH_REGISTRY` | Publish registry override. |
 | `OHPM_STRICT_SSL`, `OHPM_CA_FILES`, `OHPM_HTTP(S)_PROXY`, `OHPM_NO_PROXY`, `OHPM_LOG_LEVEL`, `OHPM_FETCH_TIMEOUT` | Network / logging overrides. |
 
-The SSH-login values can also be passed as CLI flags: `publish` and `login`
-accept `--publish_id`, `--key_path` and `--passphrase` (prefer
-`OHPM_KEY_PASSPHRASE` in CI — command-line arguments are visible in the
-process list).
+The SSH-login values can also be passed as CLI flags: `publish`, `login` and
+`unpublish` accept `--publish_id`, `--key_path` (or `--key_content` for the
+PEM text itself), and `--passphrase` (prefer the `OHPM_*` env vars in CI —
+command-line arguments are visible in the process list).
 
 ### Auth resolution for `publish` (write)
 

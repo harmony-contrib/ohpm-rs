@@ -42,6 +42,7 @@ impl EnvGuard {
             "OHPM_READ_ACCESS_TOKEN",
             "OHPM_PUBLISH_ID",
             "OHPM_KEY_PATH",
+            "OHPM_KEY_CONTENT",
             "OHPM_KEY_PASSPHRASE",
             "OHPM_REGISTRY",
             "OHPM_PUBLISH_REGISTRY",
@@ -448,6 +449,38 @@ async fn publish_from_source_directory() {
     assert!(!paths.iter().any(|p| p.contains("oh_modules")), "pack excludes oh_modules");
 }
 
+/// The private key can be supplied as inline PEM content (no key file).
+#[tokio::test]
+async fn publish_with_key_content_env() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvGuard::new();
+    let (registry, capture) = spawn_mock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let har = build_har(dir.path(), "com.example.kc", "1.0.0");
+
+    let passphrase = "secret";
+    let key_pem = encrypted_key_pem(passphrase);
+    // No key file anywhere — the PEM travels via OHPM_KEY_CONTENT.
+    std::env::set_var("OHPM_PUBLISH_ID", "kc-pid");
+    std::env::set_var("OHPM_KEY_CONTENT", &key_pem);
+    std::env::set_var("OHPM_KEY_PASSPHRASE", passphrase);
+    let config = load_config(dir.path());
+
+    let req = PublishRequest {
+        file: har.to_string_lossy().into_owned(),
+        publish_registry: Some(registry.clone()),
+        ..Default::default()
+    };
+    let client = RegistryClient::from_config(&config).unwrap();
+    publish(&client, &config, &req)
+        .await
+        .expect("publish with inline key content should succeed");
+
+    let cap = capture.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(!cap.login_pss.is_empty(), "login happened with the inline key");
+    assert_eq!(cap.attachment.len(), 1);
+}
+
 /// The SSH login context can be built from config too (no env).
 #[test]
 fn login_context_from_config_only() {
@@ -463,6 +496,6 @@ fn login_context_from_config_only() {
     cfg.set(ohpm_core::config::default::types::KEY_PASSPHRASE, "pw");
     let ctx = LoginContext::resolve(&cfg, &ohpm_core::registry::login::LoginOverrides::default()).unwrap();
     assert_eq!(ctx.publish_id, "pid");
-    assert!(ctx.key_path.exists());
+    assert!(ctx.key_path.as_ref().unwrap().exists());
     assert_eq!(ctx.passphrase, "pw");
 }

@@ -10,6 +10,8 @@ pub mod types {
     pub const PUBLISH_ID: &str = "publish_id";
     pub const CACHE: &str = "cache";
     pub const KEY_PATH: &str = "key_path";
+    /// Inline private-key PEM content (alternative to `key_path`).
+    pub const KEY_CONTENT: &str = "key_content";
     pub const KEY_PASSPHRASE: &str = "key_passphrase";
     pub const NO_PROXY: &str = "no_proxy";
     pub const HTTP_PROXY: &str = "http_proxy";
@@ -58,6 +60,7 @@ pub fn default_config() -> BTreeMap<String, ConfigValue> {
     m.insert(types::PUBLISH_ID.to_string(), ConfigValue::String(String::new()));
     m.insert(types::CACHE.to_string(), ConfigValue::String(default_cache().to_string_lossy().into_owned()));
     m.insert(types::KEY_PATH.to_string(), ConfigValue::String(String::new()));
+    m.insert(types::KEY_CONTENT.to_string(), ConfigValue::String(String::new()));
     m.insert(types::KEY_PASSPHRASE.to_string(), ConfigValue::String(String::new()));
     m.insert(types::NO_PROXY.to_string(), ConfigValue::String(String::new()));
     m.insert(types::HTTP_PROXY.to_string(), ConfigValue::String(String::new()));

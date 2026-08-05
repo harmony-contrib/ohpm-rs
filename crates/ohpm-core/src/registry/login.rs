@@ -6,7 +6,7 @@
 //! passphrase must come from `OHPM_KEY_PASSPHRASE` or the `key_passphrase`
 //! config item. If it is missing, it returns an error instead of prompting.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use base64::Engine;
 use rand::rngs::OsRng;
@@ -26,6 +26,8 @@ use crate::error::{OhpmError, Result};
 pub struct LoginOverrides {
     pub publish_id: Option<String>,
     pub key_path: Option<String>,
+    /// The private key PEM content directly (instead of `key_path`).
+    pub key_content: Option<String>,
     pub passphrase: Option<String>,
 }
 
@@ -33,13 +35,16 @@ pub struct LoginOverrides {
 #[derive(Debug)]
 pub struct LoginContext {
     pub publish_id: String,
-    pub key_path: PathBuf,
+    pub key_path: Option<PathBuf>,
+    /// The private key PEM content, when provided directly.
+    pub key_content: Option<String>,
     pub passphrase: String,
 }
 
 impl LoginContext {
     /// Resolve from overrides (CLI) > env > config. Returns an error when
-    /// anything required is missing.
+    /// anything required is missing. The key may be given either as a file
+    /// path (`key_path`) or as inline PEM content (`key_content`).
     pub fn resolve(config: &Config, overrides: &LoginOverrides) -> Result<Self> {
         let publish_id = overrides
             .publish_id
@@ -51,21 +56,36 @@ impl LoginContext {
             })
             .ok_or_else(OhpmError::publish_id_is_empty)?;
 
-        let key_path = overrides
-            .key_path
+        let key_content = overrides
+            .key_content
             .clone()
-            .map(PathBuf::from)
+            .or_else(|| std::env::var("OHPM_KEY_CONTENT").ok().filter(|s| !s.is_empty()))
             .or_else(|| {
-                std::env::var("OHPM_KEY_PATH")
-                    .ok()
-                    .filter(|s| !s.is_empty())
+                let v = config.get_string(types::KEY_CONTENT);
+                (!v.is_empty()).then_some(v)
+            });
+
+        let key_path = if key_content.is_none() {
+            Some(
+                overrides
+                    .key_path
+                    .clone()
                     .map(PathBuf::from)
-            })
-            .or_else(|| {
-                let v = config.get_string(types::KEY_PATH);
-                (!v.is_empty()).then(|| PathBuf::from(v))
-            })
-            .ok_or_else(OhpmError::key_path_is_empty)?;
+                    .or_else(|| {
+                        std::env::var("OHPM_KEY_PATH")
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                            .map(PathBuf::from)
+                    })
+                    .or_else(|| {
+                        let v = config.get_string(types::KEY_PATH);
+                        (!v.is_empty()).then(|| PathBuf::from(v))
+                    })
+                    .ok_or_else(OhpmError::key_path_is_empty)?,
+            )
+        } else {
+            None
+        };
 
         // Passphrase: CLI/env override, then config; **no interactive prompt**.
         let passphrase = overrides
@@ -85,27 +105,43 @@ impl LoginContext {
         Ok(Self {
             publish_id,
             key_path,
+            key_content,
             passphrase,
         })
     }
 }
 
-/// Read and parse the (encrypted) private key, returning the raw key.
-fn load_private_key(path: &Path, passphrase: &str) -> Result<RsaPrivateKey> {
-    if !path.exists() {
-        return Err(OhpmError::private_key_file_not_exist(&path.to_string_lossy()));
-    }
-    if path.is_dir() {
-        return Err(OhpmError::key_path_is_dir(&path.to_string_lossy()));
-    }
-    let pem = std::fs::read_to_string(path)?;
-    if pem.trim().is_empty() {
-        return Err(OhpmError::private_key_content_is_empty(&path.to_string_lossy()));
-    }
+/// Read and parse the (encrypted) private key, returning the raw key. The PEM
+/// comes either from `key_content` (inline) or from the `key_path` file.
+fn load_private_key(ctx: &LoginContext) -> Result<RsaPrivateKey> {
+    let source = || {
+        ctx.key_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "inline key content".to_string())
+    };
+    let pem = match &ctx.key_content {
+        Some(content) => content.clone(),
+        None => {
+            let path = ctx.key_path.as_ref().ok_or_else(OhpmError::key_path_is_empty)?;
+            if !path.exists() {
+                return Err(OhpmError::private_key_file_not_exist(&path.to_string_lossy()));
+            }
+            if path.is_dir() {
+                return Err(OhpmError::key_path_is_dir(&path.to_string_lossy()));
+            }
+            let pem = std::fs::read_to_string(path)?;
+            if pem.trim().is_empty() {
+                return Err(OhpmError::private_key_content_is_empty(&path.to_string_lossy()));
+            }
+            pem
+        }
+    };
     // The reference only accepts keys whose PEM contains "ENCRYPTED".
     if !pem.contains("ENCRYPTED") {
-        return Err(OhpmError::not_support_private_key(&path.to_string_lossy()));
+        return Err(OhpmError::not_support_private_key(&source()));
     }
+    let passphrase = ctx.passphrase.as_str();
 
     let key = if pem.contains("BEGIN ENCRYPTED PRIVATE KEY") {
         RsaPrivateKey::from_pkcs8_encrypted_pem(&pem, passphrase.as_bytes())
@@ -116,7 +152,7 @@ fn load_private_key(path: &Path, passphrase: &str) -> Result<RsaPrivateKey> {
                 .map_err(|e| signing_failed_with(&e.to_string()))
         })?
     } else {
-        return Err(OhpmError::not_support_private_key(&path.to_string_lossy()));
+        return Err(OhpmError::not_support_private_key(&source()));
     };
 
     // Validate the key really is RSA (the reference signs with RSA).
@@ -156,7 +192,7 @@ pub async fn login(
     registry: &str,
     ctx: &LoginContext,
 ) -> Result<String> {
-    let key = load_private_key(&ctx.key_path, &ctx.passphrase)?;
+    let key = load_private_key(ctx)?;
 
     let timestamp = now_millis();
     let nonce = new_nonce();
@@ -329,7 +365,8 @@ mod tests {
 
         let ctx = LoginContext::resolve(&cfg, &LoginOverrides::default()).unwrap();
         assert_eq!(ctx.publish_id, "cfg-pid");
-        assert_eq!(ctx.key_path, PathBuf::from("/tmp/cfg-key"));
+        assert_eq!(ctx.key_path, Some(PathBuf::from("/tmp/cfg-key")));
+        assert!(ctx.key_content.is_none());
         assert_eq!(ctx.passphrase, "cfg-secret");
 
         // CLI overrides win.
@@ -337,10 +374,38 @@ mod tests {
             publish_id: Some("cli-pid".into()),
             key_path: Some("/tmp/cli-key".into()),
             passphrase: Some("cli-secret".into()),
+            ..Default::default()
         };
         let ctx = LoginContext::resolve(&cfg, &overrides).unwrap();
         assert_eq!(ctx.publish_id, "cli-pid");
         assert_eq!(ctx.passphrase, "cli-secret");
+    }
+
+    #[test]
+    fn key_content_supplies_the_key_without_a_path() {
+        let mut cfg = Config::new();
+        cfg.set(types::PUBLISH_ID, "pid");
+        cfg.set(types::KEY_PASSPHRASE, "secret");
+
+        // Inline content via config; key_path is not required.
+        cfg.set(types::KEY_CONTENT, "-----BEGIN ENCRYPTED PRIVATE KEY-----\n...");
+        let ctx = LoginContext::resolve(&cfg, &LoginOverrides::default()).unwrap();
+        assert!(ctx.key_path.is_none());
+        assert_eq!(
+            ctx.key_content.as_deref(),
+            Some("-----BEGIN ENCRYPTED PRIVATE KEY-----\n...")
+        );
+
+        // CLI override wins over config content.
+        let overrides = LoginOverrides {
+            key_content: Some("-----BEGIN ENCRYPTED PRIVATE KEY-----\ncli".into()),
+            ..Default::default()
+        };
+        let ctx = LoginContext::resolve(&cfg, &overrides).unwrap();
+        assert_eq!(
+            ctx.key_content.as_deref(),
+            Some("-----BEGIN ENCRYPTED PRIVATE KEY-----\ncli")
+        );
     }
 
     #[test]

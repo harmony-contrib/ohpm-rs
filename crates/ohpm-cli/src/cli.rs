@@ -56,6 +56,10 @@ pub struct PublishArgs {
     /// The private SSH key path corresponding to the publish_id.
     #[arg(long = "key_path")]
     pub key_path: Option<String>,
+    /// The private key PEM content directly (alternative to --key_path;
+    /// prefer the OHPM_KEY_CONTENT env var in CI).
+    #[arg(long = "key_content", allow_hyphen_values = true)]
+    pub key_content: Option<String>,
     /// The private key passphrase (prefer the OHPM_KEY_PASSPHRASE env var in
     /// CI; this flag is visible in the process list).
     #[arg(long)]
@@ -124,6 +128,10 @@ pub struct LoginArgs {
     /// Private key path.
     #[arg(long = "key_path")]
     pub key_path: Option<String>,
+    /// The private key PEM content directly (alternative to --key_path;
+    /// prefer the OHPM_KEY_CONTENT env var in CI).
+    #[arg(long = "key_content", allow_hyphen_values = true)]
+    pub key_content: Option<String>,
     /// Private key passphrase.
     #[arg(long)]
     pub passphrase: Option<String>,
@@ -143,6 +151,10 @@ pub struct UnpublishArgs {
     pub publish_id: Option<String>,
     #[arg(long = "key_path")]
     pub key_path: Option<String>,
+    /// The private key PEM content directly (alternative to --key_path;
+    /// prefer the OHPM_KEY_CONTENT env var in CI).
+    #[arg(long = "key_content", allow_hyphen_values = true)]
+    pub key_content: Option<String>,
     #[arg(long)]
     pub timeout: Option<u64>,
 }

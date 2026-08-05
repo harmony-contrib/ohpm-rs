@@ -18,6 +18,7 @@ pub async fn run(args: &LoginArgs) -> Result<()> {
     let overrides = LoginOverrides {
         publish_id: args.publish_id.clone(),
         key_path: args.key_path.clone(),
+        key_content: args.key_content.clone(),
         passphrase: args.passphrase.clone(),
     };
 
