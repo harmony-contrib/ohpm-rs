@@ -53,10 +53,12 @@ pub fn build_har_metadata(m: &Manifest, ctx: &MetaContext) -> Result<Value> {
     let mut version_entry = manifest_to_object(m);
     if let Value::Object(ve) = &mut version_entry {
         let mut dist = Map::new();
-        dist.insert("integrity".into(), json!(ctx.har_integrity.to_integrity_string()));
+        // The registry validates the attachment against this single sha512
+        // ssri entry (the reference's `getIntegrity()` picks sha512).
+        dist.insert("integrity".into(), json!(ctx.har_integrity.to_ssri()));
         dist.insert("tarball".into(), json!(tarball));
         if let Some(hsp) = &ctx.hsp {
-            dist.insert("integrity_hsp".into(), json!(hsp.integrity.to_integrity_string()));
+            dist.insert("integrity_hsp".into(), json!(hsp.integrity.to_ssri()));
         }
         ve.insert("dist".into(), Value::Object(dist));
     }
@@ -155,7 +157,7 @@ mod tests {
         );
         assert_eq!(
             doc["versions"]["1.0.0"]["dist"]["integrity"].as_str().unwrap(),
-            "sha1-c2hhMQ== sha512-c2hhNTEy"
+            "sha512-c2hhNTEy"
         );
         assert!(doc.get("hspType").is_none());
     }

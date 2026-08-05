@@ -208,7 +208,7 @@ async fn publish_with_env_access_token() {
     let (auth, meta) = &cap.attachment[0];
     assert_eq!(auth, "env-secret-token", "token must be sent in the Authorization header");
     assert_eq!(meta["dist-tags"]["latest"], "1.0.0");
-    assert!(meta["versions"]["1.0.0"]["dist"]["integrity"].as_str().unwrap().starts_with("sha1-"));
+    assert!(meta["versions"]["1.0.0"]["dist"]["integrity"].as_str().unwrap().starts_with("sha512-"));
     assert!(meta["versions"]["1.0.0"]["dist"]["tarball"].as_str().unwrap().contains("com.example.ci"));
     // internal fields must be cleared before upload
     assert!(meta.get("pkg").is_none());

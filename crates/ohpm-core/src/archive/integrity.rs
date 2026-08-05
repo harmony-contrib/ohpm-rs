@@ -21,12 +21,15 @@ pub struct Integrity {
 }
 
 impl Integrity {
-    /// ssri integrity string, e.g. `sha1-<b64> sha512-<b64>`.
-    pub fn to_integrity_string(&self) -> String {
-        format!("sha1-{} sha512-{}", self.sha1, self.sha512)
+    /// The ssri integrity string the registry validates: the single
+    /// `sha512-<base64>` entry. The reference `getIntegrity()` picks one
+    /// algorithm (sha512 per the prioritized list), so `dist.integrity` /
+    /// `integrity_hsp` carry sha512 only.
+    pub fn to_ssri(&self) -> String {
+        format!("sha512-{}", self.sha512)
     }
 
-    /// SHA-1 base64 digest used as the package `shasum`.
+    /// SHA-1 base64 digest used as the package `shasum` (display only).
     pub fn shasum(&self) -> &str {
         &self.sha1
     }
@@ -65,6 +68,6 @@ mod tests {
         let expected = base64::engine::general_purpose::STANDARD
             .encode(Sha1::digest(b"hello world\n"));
         assert_eq!(integrity.sha1, expected);
-        assert!(integrity.to_integrity_string().starts_with("sha1-"));
+        assert!(integrity.to_ssri().starts_with("sha512-"));
     }
 }
