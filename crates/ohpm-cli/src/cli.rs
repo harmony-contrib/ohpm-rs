@@ -41,9 +41,10 @@ pub enum Command {
 
 #[derive(Args, Debug, Clone)]
 pub struct PublishArgs {
-    /// The har or tgz package file.
+    /// The har or tgz package file (or a source directory). Omit to publish
+    /// the current package directory directly from source.
     #[arg(value_name = "har_or_tgz_file")]
-    pub file: String,
+    pub file: Option<String>,
     /// Add the specified tag to the current version.
     #[arg(short = 't', long)]
     pub tag: Option<String>,
@@ -71,9 +72,10 @@ pub struct PublishArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct PrepublishArgs {
-    /// The har or tgz package file (or a source directory).
+    /// The har or tgz package file (or a source directory). Omit to validate
+    /// the current package directory directly from source.
     #[arg(value_name = "har_or_tgz_file")]
-    pub file: String,
+    pub file: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]

@@ -1,11 +1,14 @@
-//! `ohpm publish` — the flagship command.
+//! `ohpm-rs publish [<har_or_tgz_file> | <source_dir>]` — publish a package.
 //!
-//! Authentication works entirely from environment variables
-//! (`OHPM_ACCESS_TOKEN`, or `OHPM_PUBLISH_ID` + `OHPM_KEY_PATH` +
-//! `OHPM_KEY_PASSPHRASE` for the SSH-key login flow). No interactive prompts.
+//! With no argument the current package directory is published directly from
+//! source (auto-packed first, the default behavior). Passing a `.har`/`.tgz`
+//! publishes the pre-built package; passing a directory packs and publishes it.
+//! Authentication works entirely from environment variables or CLI flags —
+//! no interactive prompts.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use ohpm_core::config::default::types;
+use ohpm_core::config::find_local_prefix;
 use ohpm_core::publish::{self, PublishRequest};
 use ohpm_core::registry::login::LoginOverrides;
 use ohpm_core::registry::RegistryClient;
@@ -20,8 +23,11 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
     }
     let client = RegistryClient::from_config(&config)?;
 
+    let cwd = std::env::current_dir()?;
+    let (input, package_root) = resolve_input(args.file.as_deref(), &cwd)?;
+
     let req = PublishRequest {
-        file: args.file.clone(),
+        file: input,
         tag: args.tag.clone(),
         publish_registry: args.publish_registry.clone(),
         login: LoginOverrides {
@@ -31,7 +37,7 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
             passphrase: args.passphrase.clone(), // or OHPM_KEY_PASSPHRASE / key_passphrase
         },
         timeout: args.timeout,
-        package_root: package_source_root(&args.file),
+        package_root: Some(package_root),
     };
 
     let outcome = publish::publish(&client, &config, &req).await?;
@@ -42,14 +48,33 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
     Ok(())
 }
 
-/// The source root of the package being published, used to resolve `file:`
-/// workspace dependencies. A directory input is its own source root;
-/// otherwise the nearest dir with `oh-package.json5` walking up from the cwd.
-fn package_source_root(input: &str) -> Option<std::path::PathBuf> {
-    let input_path = std::path::PathBuf::from(input);
-    if input_path.is_dir() {
-        return Some(input_path);
+/// Resolve the publish input: an explicit file/directory argument, or the
+/// current package directory (publish-from-source default).
+fn resolve_input(input: Option<&str>, cwd: &std::path::Path) -> Result<(String, std::path::PathBuf)> {
+    match input {
+        Some(arg) => {
+            let p = std::path::PathBuf::from(arg);
+            if p.is_dir() {
+                Ok((arg.to_string(), p))
+            } else {
+                Ok((arg.to_string(), package_source_root(cwd)))
+            }
+        }
+        None => {
+            let local = find_local_prefix(cwd).ok_or_else(|| {
+                anyhow!(
+                    "No {} found in the current directory. Run publish from a package directory \
+                     (publish-from-source), or pass a har/tgz file explicitly.",
+                    ohpm_core::constants::MY_PACKAGE_JSON
+                )
+            })?;
+            Ok((local.to_string_lossy().into_owned(), local))
+        }
     }
-    let cwd = std::env::current_dir().ok()?;
-    Some(ohpm_core::config::find_local_prefix(&cwd).unwrap_or(cwd))
+}
+
+/// The source root used to resolve `file:` workspace dependencies: the nearest
+/// dir with `oh-package.json5` walking up from the cwd.
+fn package_source_root(cwd: &std::path::Path) -> std::path::PathBuf {
+    find_local_prefix(cwd).unwrap_or_else(|| cwd.to_path_buf())
 }

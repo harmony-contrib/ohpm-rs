@@ -86,19 +86,28 @@ ohpm.
 ## Publishing in CI
 
 ```sh
-# Fast path: you already have a token.
+# Fast path: you already have a token. Publish from source by default —
+# no argument packs the current package directory automatically.
 export OHPM_ACCESS_TOKEN="<token>"
-ohpm-rs publish my-lib.har --publish_registry https://repo.example.com/ohpm/
+ohpm-rs publish --publish_registry https://repo.example.com/ohpm/
 
 # Tokenless path: private-key login, fully from env.
 export OHPM_PUBLISH_ID="<publish-id>"
-export OHPM_KEY_PATH="/path/to/key.pem"
+export OHPM_KEY_PATH="/path/to/key.pem"       # or OHPM_KEY_CONTENT="<pem>"
 export OHPM_KEY_PASSPHRASE="<passphrase>"
+ohpm-rs publish
+
+# Pre-built packages: pass the har/tgz explicitly (or a source directory).
 ohpm-rs publish my-lib.har
+ohpm-rs publish ./src/mylib
 
 # Obtain and persist a token once (stored in ~/.ohpm/.ohpmrc).
 ohpm-rs login --publish_id <id> --key_path /path/to/key.pem
 ```
+
+`publish` (and `prepublish`) input resolution: no argument = current package
+directory, packed on the fly; a directory argument = pack that directory; a
+`.har`/`.tgz` argument = publish the pre-built package as-is.
 
 ## Building HAR packages
 
