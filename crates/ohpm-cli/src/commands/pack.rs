@@ -1,7 +1,7 @@
-//! `ohpm-rs pack [source_dir] [--output <dir>] [--all] [--filter <pkgs>]` —
+//! `ohpm-rs pack [source_dir] [--output <dir>] [--workspace] [--filter <pkgs>]` —
 //! build `<name>-<version>.har` packages (npm-pack style).
 //!
-//! Single mode packs one source directory; `--all` / `--filter` pack every
+//! Single mode packs one source directory; `--workspace` / `--filter` pack every
 //! (selected) publishable workspace member.
 
 use anyhow::{anyhow, Result};
@@ -16,9 +16,9 @@ pub async fn run(args: &PackArgs) -> Result<()> {
     let _config = load_config()?;
     let cwd = std::env::current_dir()?;
 
-    let batch = args.all || !args.filter.is_empty();
+    let batch = args.workspace || !args.filter.is_empty();
     if batch && args.source.is_some() {
-        anyhow::bail!("--all/--filter cannot be combined with a source_dir argument.");
+        anyhow::bail!("--workspace/--filter cannot be combined with a source_dir argument.");
     }
 
     let output_dir = args
@@ -38,7 +38,7 @@ pub async fn run(args: &PackArgs) -> Result<()> {
 fn run_batch(cwd: &std::path::Path, output_dir: &std::path::Path, filter: &[String]) -> Result<()> {
     let ws = Workspace::find(cwd)?.ok_or_else(|| {
         anyhow!(
-            "No {} found walking up from the current directory; --all/--filter require a workspace.",
+            "No {} found walking up from the current directory; --workspace/--filter require a workspace.",
             ohpm_core::workspace::WORKSPACE_CONFIG
         )
     })?;

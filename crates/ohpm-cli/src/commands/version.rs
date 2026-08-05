@@ -1,7 +1,7 @@
-//! `ohpm version [<newversion> | major | minor | patch] [--all] [--filter <pkgs>]`.
+//! `ohpm version [<newversion> | major | minor | patch] [--workspace] [--filter <pkgs>]`.
 //!
 //! Unified mode (bump every member to the same version) is triggered by
-//! `--all`, or by `version.mode: unified` in `ohpm-workspace.yaml`. Otherwise
+//! `--workspace`, or by `version.mode: unified` in `ohpm-workspace.yaml`. Otherwise
 //! only the package containing the current directory is bumped (independent).
 
 use anyhow::{anyhow, Result};
@@ -20,14 +20,14 @@ pub async fn run(args: &VersionArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let action = args.action.as_deref().ok_or_else(|| {
         anyhow!(
-            "Usage: ohpm version [--all] [--filter <pkgs>] [--preid <id>] \
+            "Usage: ohpm version [--workspace] [--filter <pkgs>] [--preid <id>] \
              [<newversion> | major | minor | patch | pre* | prerelease]"
         )
     })?;
     let preid = args.preid.as_deref();
 
     let ws = Workspace::find(&cwd)?;
-    let force_unified = args.all
+    let force_unified = args.workspace
         || ws
             .as_ref()
             .map(|w| w.version_mode == VersionMode::Unified)
@@ -44,7 +44,7 @@ pub async fn run(args: &VersionArgs) -> Result<()> {
         run_unified(&ws, action, &args.filter, preid)
     } else {
         if !args.filter.is_empty() {
-            anyhow::bail!("--filter only applies in unified version mode (use --all).");
+            anyhow::bail!("--filter only applies in unified version mode (use --workspace).");
         }
         run_independent(&cwd, action, preid)
     }

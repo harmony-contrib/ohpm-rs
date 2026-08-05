@@ -71,7 +71,7 @@ pub struct PrepublishArgs {
 #[derive(Args, Debug, Clone)]
 pub struct PackArgs {
     /// Source directory containing oh-package.json5 (defaults to the current
-    /// package directory). Mutually exclusive with --all/--filter.
+    /// package directory). Mutually exclusive with --workspace/--filter.
     #[arg(value_name = "source_dir")]
     pub source: Option<String>,
     /// Output directory for the har (defaults to the current directory).
@@ -79,7 +79,7 @@ pub struct PackArgs {
     pub output: Option<String>,
     /// Pack every publishable workspace member (workspace batch mode).
     #[arg(long)]
-    pub all: bool,
+    pub workspace: bool,
     /// Only pack the listed workspace members (by name, comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub filter: Vec<String>,
@@ -186,7 +186,7 @@ pub struct VersionArgs {
     /// Bump every package in the workspace to the same version (workspace
     /// unified mode).
     #[arg(long)]
-    pub all: bool,
+    pub workspace: bool,
     /// Only bump the listed workspace packages (by name, comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub filter: Vec<String>,

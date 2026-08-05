@@ -167,27 +167,27 @@ Rules:
 | Command | Workspace mode |
 |---|---|
 | `publish` / `prepublish` | `file:` deps rewritten to member versions before upload; accepts a member directory (auto-pack) |
-| `pack` | `--all` packs every publishable member; `--filter <pkgs>` selects; `publish: false` skipped |
+| `pack` | `--workspace` packs every publishable member; `--filter <pkgs>` selects; `publish: false` skipped |
 | `list` | `-r/--recursive` lists every member's graph; at the workspace root all members are listed by default |
-| `version` | `--all` unified, `--filter`, `--preid`, `version.mode` from the yaml, `publish: false` skipped |
+| `version` | `--workspace` unified, `--filter`, `--preid`, `version.mode` from the yaml, `publish: false` skipped |
 | `unpublish`, `info` | operate by package name — work from anywhere |
 | `init`, `config`, `login`, `ping`, `root`, `cache` | global / cwd-scoped — not workspace-scoped |
 
 ### Versioning
 
-`ohpm-rs version` supports two workspace modes, selectable by the `--all` flag or
+`ohpm-rs version` supports two workspace modes, selectable by the `--workspace` flag or
 by `version.mode` in `ohpm-workspace.yaml`:
 
 ```sh
 # Unified: every workspace member is set to the same new version
 # (base = the workspace root's own version, else the highest member version).
-ohpm-rs version --all minor
+ohpm-rs version --workspace minor
 
 # Same effect when the workspace config declares version.mode: unified.
 ohpm-rs version patch                       # run from the workspace root
 
 # Filter to specific packages (comma-separated, repeatable):
-ohpm-rs version --all patch --filter @demo/a,@demo/b
+ohpm-rs version --workspace patch --filter @demo/a,@demo/b
 
 # Independent: only the package containing the current directory is bumped,
 # works inside a workspace member too.
@@ -215,7 +215,7 @@ pre-release of the same number).
 A package whose `oh-package.json5` sets `"publish": false` is **not
 publishable**:
 
-- skipped by `ohpm-rs version --all` (and the unified mode),
+- skipped by `ohpm-rs version --workspace` (and the unified mode),
 - excluded from the unified base version,
 - an explicit `ohpm-rs publish <file>` of such a package fails with
   `PublishForbidden`.
