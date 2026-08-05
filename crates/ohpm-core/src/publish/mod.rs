@@ -30,6 +30,9 @@ pub struct PublishRequest {
     /// The source directory of the published package. Used to resolve `file:`
     /// dependencies in workspace mode (defaults to the current directory).
     pub package_root: Option<PathBuf>,
+    /// Validate everything (packing, metadata, auth configuration) but do not
+    /// upload — no network requests are made.
+    pub dry_run: bool,
 }
 
 /// Outcome of a successful publish, surfaced by the CLI.
@@ -38,6 +41,12 @@ pub struct PublishOutcome {
     pub name: String,
     pub version: String,
     pub additional_msg: Option<String>,
+    /// True when this was a `--dry-run` (no upload happened).
+    pub dry_run: bool,
+    /// Total package size in bytes.
+    pub pkg_size: u64,
+    /// Number of files in the package archive(s).
+    pub file_num: usize,
 }
 
 /// State gathered during validation, shared by publish and prepublish.
@@ -50,15 +59,22 @@ struct PublishContext {
     /// Cache dir holding an auto-packed har for directory inputs.
     extra_cache: Option<PathBuf>,
     size: u64,
+    file_num: usize,
     registry: String,
     tag: String,
     login: LoginOverrides,
 }
 
-/// Run the full publish flow (validation + upload).
+/// Run the full publish flow (validation + upload). With `req.dry_run`, every
+/// local step runs (packing, metadata, auth configuration) but nothing is
+/// uploaded and no network request is made.
 pub async fn publish(client: &RegistryClient, config: &Config, req: &PublishRequest) -> Result<PublishOutcome> {
     let ctx = validate_and_prepare(config, req, true).await?;
-    let outcome = do_publish(client, config, &ctx).await?;
+    let outcome = if req.dry_run {
+        do_publish_dry_run(config, &ctx).await?
+    } else {
+        do_publish(client, config, &ctx).await?
+    };
     cleanup(&ctx);
     Ok(outcome)
 }
@@ -69,11 +85,16 @@ pub async fn prepublish(config: &Config, req: &PublishRequest) -> Result<Publish
     let ctx = validate_and_prepare(config, req, false).await?;
     let name = ctx.manifest.name.clone();
     let version = ctx.manifest.version.clone();
+    let pkg_size = ctx.size;
+    let file_num = ctx.file_num;
     cleanup(&ctx);
     Ok(PublishOutcome {
         name,
         version,
         additional_msg: None,
+        dry_run: false,
+        pkg_size,
+        file_num,
     })
 }
 
@@ -216,6 +237,7 @@ async fn validate_and_prepare(
     }
 
     let size = har_pkg.size + hsp_pkg.as_ref().map(|p| p.size).unwrap_or(0);
+    let file_num = har_pkg.entry_count + hsp_pkg.as_ref().map(|p| p.entry_count).unwrap_or(0);
     let tag = req.tag.clone().unwrap_or_else(|| constants::LATEST.to_string());
 
     Ok(PublishContext {
@@ -226,6 +248,7 @@ async fn validate_and_prepare(
         cache_dir,
         extra_cache,
         size,
+        file_num,
         registry,
         tag,
         login: req.login.clone(),
@@ -283,6 +306,53 @@ async fn do_publish(
         name: ctx.manifest.name.clone(),
         version: ctx.manifest.version.clone(),
         additional_msg,
+        dry_run: false,
+        pkg_size: ctx.size,
+        file_num: ctx.file_num,
+    })
+}
+
+/// Dry run: build the metadata and verify the auth configuration locally, but
+/// skip the login request and the upload entirely.
+async fn do_publish_dry_run(config: &Config, ctx: &PublishContext) -> Result<PublishOutcome> {
+    let har_pkg = validate::get_pkg_content(&ctx.har_path)?;
+    let meta_ctx = meta::MetaContext {
+        registry: ctx.registry.clone(),
+        tag: ctx.tag.clone(),
+        har_integrity: har_pkg.integrity,
+        hsp: None,
+        har_abs: Some(ctx.har_path.clone()),
+    };
+    let metadata = meta::build_har_metadata(&ctx.manifest, &meta_ctx)?;
+
+    // Auth: a configured token is used as-is; otherwise the SSH-key login
+    // inputs must all be present and the key must parse (no network).
+    let auth_desc = if !auth::configured_write_token(config, &ctx.registry).is_empty() {
+        "access token".to_string()
+    } else {
+        let login_ctx = crate::registry::login::LoginContext::resolve(config, &ctx.login)?;
+        crate::registry::login::validate_key(&login_ctx)?;
+        "ssh-key login".to_string()
+    };
+
+    log::info!(
+        "dry run: {}@{} would be published to {} with tag \"{}\" ({} bytes, {} files, auth: {auth_desc})",
+        ctx.manifest.name,
+        ctx.manifest.version,
+        ctx.registry,
+        ctx.tag,
+        ctx.size,
+        ctx.file_num
+    );
+    let _ = metadata;
+
+    Ok(PublishOutcome {
+        name: ctx.manifest.name.clone(),
+        version: ctx.manifest.version.clone(),
+        additional_msg: Some(auth_desc),
+        dry_run: true,
+        pkg_size: ctx.size,
+        file_num: ctx.file_num,
     })
 }
 

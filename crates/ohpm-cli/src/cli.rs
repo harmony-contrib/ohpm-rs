@@ -74,6 +74,9 @@ pub struct PublishArgs {
     /// Only publish the listed workspace members (by name, comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub filter: Vec<String>,
+    /// Validate everything without uploading (no network requests).
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug, Clone)]

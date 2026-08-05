@@ -160,6 +160,13 @@ fn load_private_key(ctx: &LoginContext) -> Result<RsaPrivateKey> {
     Ok(key)
 }
 
+/// Validate the key material locally (readable + parseable with the given
+/// passphrase) without performing any login request. Used by `--dry-run`.
+pub fn validate_key(ctx: &LoginContext) -> Result<()> {
+    let _ = load_private_key(ctx)?;
+    Ok(())
+}
+
 fn signing_failed_with(detail: &str) -> OhpmError {
     OhpmError::new(
         "SignatureFailed",

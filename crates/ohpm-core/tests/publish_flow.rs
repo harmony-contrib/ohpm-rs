@@ -527,6 +527,41 @@ async fn publish_workspace_batch() {
     assert!(!cap.attachment.iter().any(|(_, m)| m["name"] == "pkg.priv"));
 }
 
+/// `--dry-run` runs the full local validation but never uploads or logs in.
+#[tokio::test]
+async fn publish_dry_run_skips_network() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvGuard::new();
+    let (registry, capture) = spawn_mock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let har = build_har(dir.path(), "com.example.dry", "1.0.0");
+
+    // Even without any token configured, dry-run with SSH inputs must pass.
+    let passphrase = "secret";
+    let key_path = dir.path().join("key.pem");
+    std::fs::write(&key_path, encrypted_key_pem(passphrase)).unwrap();
+    std::env::set_var("OHPM_PUBLISH_ID", "dry-pid");
+    std::env::set_var("OHPM_KEY_PATH", key_path.to_string_lossy().into_owned());
+    std::env::set_var("OHPM_KEY_PASSPHRASE", passphrase);
+
+    let config = load_config(dir.path());
+    let req = PublishRequest {
+        file: har.to_string_lossy().into_owned(),
+        publish_registry: Some(registry.clone()),
+        dry_run: true,
+        ..Default::default()
+    };
+    let client = RegistryClient::from_config(&config).unwrap();
+    let outcome = publish(&client, &config, &req).await.expect("dry run should succeed");
+    assert!(outcome.dry_run);
+    assert_eq!(outcome.additional_msg.as_deref(), Some("ssh-key login"));
+
+    // Nothing reached the mock: no login, no upload.
+    let cap = capture.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(cap.login_pss.is_empty());
+    assert!(cap.attachment.is_empty());
+}
+
 /// The SSH login context can be built from config too (no env).
 #[test]
 fn login_context_from_config_only() {

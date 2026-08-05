@@ -47,14 +47,30 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
         },
         timeout: args.timeout,
         package_root: Some(package_root),
+        dry_run: args.dry_run,
     };
 
     let outcome = publish::publish(&client, &config, &req).await?;
-    output::succeed(&format!("+{} {}", outcome.name, outcome.version));
-    if let Some(msg) = outcome.additional_msg {
-        output::output(&msg);
-    }
+    print_outcome(&outcome);
     Ok(())
+}
+
+fn print_outcome(outcome: &publish::PublishOutcome) {
+    if outcome.dry_run {
+        output::output(&format!(
+            "[DRY RUN] +{} {} ({} bytes, {} files, auth: {})",
+            outcome.name,
+            outcome.version,
+            outcome.pkg_size,
+            outcome.file_num,
+            outcome.additional_msg.as_deref().unwrap_or("?")
+        ));
+    } else {
+        output::succeed(&format!("+{} {}", outcome.name, outcome.version));
+        if let Some(msg) = &outcome.additional_msg {
+            output::output(msg);
+        }
+    }
 }
 
 /// Publish every (filtered, publishable) workspace member.
@@ -81,17 +97,16 @@ async fn run_workspace(
             passphrase: args.passphrase.clone(),
         },
         timeout: args.timeout,
+        dry_run: args.dry_run,
         ..Default::default()
     };
     let outcomes = publish::publish_workspace(client, config, &ws, &args.filter, &base).await?;
     for outcome in &outcomes {
-        output::succeed(&format!("+{} {}", outcome.name, outcome.version));
-        if let Some(msg) = &outcome.additional_msg {
-            output::output(msg);
-        }
+        print_outcome(outcome);
     }
     if !outcomes.is_empty() {
-        output::succeed(&format!("published {} package(s)", outcomes.len()));
+        let verb = if args.dry_run { "would publish" } else { "published" };
+        output::succeed(&format!("{verb} {} package(s)", outcomes.len()));
     } else {
         output::output("no package was published (all selected members are publish: false)");
     }

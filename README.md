@@ -111,6 +111,15 @@ directory, packed on the fly; a directory argument = pack that directory; a
 `--workspace` publishes every publishable member (or `--filter <pkgs>` a
 selected subset); `publish: false` members are skipped.
 
+`publish --dry-run` validates everything locally — packing, metadata, and the
+auth configuration (the key is parsed, the token/env/config inputs are
+checked) — but makes **no network requests** and uploads nothing:
+
+```sh
+ohpm-rs publish --dry-run            # [DRY RUN] +name version (size, files, auth)
+ohpm-rs publish --workspace --dry-run
+```
+
 ## Building HAR packages
 
 `ohpm-rs pack` builds a `<name>-<version>.har` from a source directory
