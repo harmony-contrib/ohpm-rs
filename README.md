@@ -162,6 +162,17 @@ Rules:
   `devDependencies` is kept with a warning.
 - Outside a workspace (no `ohpm-workspace.yaml`), no rewriting happens.
 
+### Workspace support per command
+
+| Command | Workspace mode |
+|---|---|
+| `publish` / `prepublish` | `file:` deps rewritten to member versions before upload; accepts a member directory (auto-pack) |
+| `pack` | `--all` packs every publishable member; `--filter <pkgs>` selects; `publish: false` skipped |
+| `list` | `-r/--recursive` lists every member's graph; at the workspace root all members are listed by default |
+| `version` | `--all` unified, `--filter`, `--preid`, `version.mode` from the yaml, `publish: false` skipped |
+| `unpublish`, `info` | operate by package name — work from anywhere |
+| `init`, `config`, `login`, `ping`, `root`, `cache` | global / cwd-scoped — not workspace-scoped |
+
 ### Versioning
 
 `ohpm-rs version` supports two workspace modes, selectable by the `--all` flag or
