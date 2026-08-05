@@ -481,6 +481,52 @@ async fn publish_with_key_content_env() {
     assert_eq!(cap.attachment.len(), 1);
 }
 
+/// `publish_workspace` publishes every publishable member and skips
+/// `publish: false` ones.
+#[tokio::test]
+async fn publish_workspace_batch() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvGuard::new();
+    let (registry, capture) = spawn_mock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+
+    std::fs::write(dir.path().join("ohpm-workspace.yaml"), "packages:\n  - packages/*\n").unwrap();
+    for (rel, name, publish) in [
+        ("packages/a", "pkg.a", true),
+        ("packages/b", "pkg.b", true),
+        ("packages/priv", "pkg.priv", false),
+    ] {
+        let member = dir.path().join(rel);
+        std::fs::create_dir_all(member.join("src")).unwrap();
+        let manifest = if publish {
+            format!("{{ name: \"{name}\", version: \"1.0.0\", main: \"index.ets\" }}\n")
+        } else {
+            format!("{{ name: \"{name}\", version: \"1.0.0\", publish: false }}\n")
+        };
+        std::fs::write(member.join("oh-package.json5"), manifest).unwrap();
+        std::fs::write(member.join("index.ets"), "export {}\n").unwrap();
+    }
+
+    std::env::set_var("OHPM_ACCESS_TOKEN", "ws-token");
+    let config = load_config(dir.path());
+    let ws = ohpm_core::workspace::Workspace::load(dir.path()).unwrap();
+    let client = RegistryClient::from_config(&config).unwrap();
+    let base = PublishRequest {
+        publish_registry: Some(registry.clone()),
+        ..Default::default()
+    };
+    let outcomes = ohpm_core::publish::publish_workspace(&client, &config, &ws, &[], &base)
+        .await
+        .expect("workspace publish should succeed");
+    let names: Vec<&str> = outcomes.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(names, vec!["pkg.a", "pkg.b"], "publish: false member is skipped");
+
+    let cap = capture.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(cap.attachment.len(), 2);
+    // The publish: false member must not have been uploaded.
+    assert!(!cap.attachment.iter().any(|(_, m)| m["name"] == "pkg.priv"));
+}
+
 /// The SSH login context can be built from config too (no env).
 #[test]
 fn login_context_from_config_only() {

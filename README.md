@@ -107,7 +107,9 @@ ohpm-rs login --publish_id <id> --key_path /path/to/key.pem
 
 `publish` (and `prepublish`) input resolution: no argument = current package
 directory, packed on the fly; a directory argument = pack that directory; a
-`.har`/`.tgz` argument = publish the pre-built package as-is.
+`.har`/`.tgz` argument = publish the pre-built package as-is. In a workspace,
+`--workspace` publishes every publishable member (or `--filter <pkgs>` a
+selected subset); `publish: false` members are skipped.
 
 ## Building HAR packages
 
@@ -181,7 +183,7 @@ Rules:
 
 | Command | Workspace mode |
 |---|---|
-| `publish` / `prepublish` | `file:` deps rewritten to member versions before upload; accepts a member directory (auto-pack) |
+| `publish` / `prepublish` | `file:` deps rewritten to member versions before upload; accepts a member directory (auto-pack); `--workspace`/`--filter` publish every (selected) publishable member |
 | `pack` | `--workspace` packs every publishable member; `--filter <pkgs>` selects; `publish: false` skipped |
 | `list` | `-r/--recursive` lists every member's graph; at the workspace root all members are listed by default |
 | `version` | `--workspace` unified, `--filter`, `--preid`, `version.mode` from the yaml, `publish: false` skipped |

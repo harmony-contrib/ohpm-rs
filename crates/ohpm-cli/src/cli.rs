@@ -68,6 +68,12 @@ pub struct PublishArgs {
     /// Network request timeout in milliseconds.
     #[arg(long)]
     pub timeout: Option<u64>,
+    /// Publish every publishable workspace member (workspace batch mode).
+    #[arg(long)]
+    pub workspace: bool,
+    /// Only publish the listed workspace members (by name, comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub filter: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -76,6 +82,12 @@ pub struct PrepublishArgs {
     /// the current package directory directly from source.
     #[arg(value_name = "har_or_tgz_file")]
     pub file: Option<String>,
+    /// Validate every publishable workspace member (workspace batch mode).
+    #[arg(long)]
+    pub workspace: bool,
+    /// Only validate the listed workspace members (by name, comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub filter: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]

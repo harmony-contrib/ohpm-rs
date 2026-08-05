@@ -77,6 +77,64 @@ pub async fn prepublish(config: &Config, req: &PublishRequest) -> Result<Publish
     })
 }
 
+/// Publish every (filtered, publishable) workspace member. `base` is the
+/// request template (tag/registry/auth/timeout); each member's directory is
+/// packed and published with its own `package_root`. `publish: false` members
+/// are skipped. Stops at the first failure.
+pub async fn publish_workspace(
+    client: &RegistryClient,
+    config: &Config,
+    ws: &crate::workspace::Workspace,
+    filter: &[String],
+    base: &PublishRequest,
+) -> Result<Vec<PublishOutcome>> {
+    let mut outcomes = Vec::new();
+    for member in select_publishable(ws, filter)? {
+        let mut req = base.clone();
+        req.file = member.dir.to_string_lossy().into_owned();
+        req.package_root = Some(member.dir.clone());
+        let outcome = publish(client, config, &req).await?;
+        outcomes.push(outcome);
+    }
+    Ok(outcomes)
+}
+
+/// Validate every (filtered, publishable) workspace member without uploading.
+pub async fn prepublish_workspace(
+    config: &Config,
+    ws: &crate::workspace::Workspace,
+    filter: &[String],
+    base: &PublishRequest,
+) -> Result<Vec<PublishOutcome>> {
+    let mut outcomes = Vec::new();
+    for member in select_publishable(ws, filter)? {
+        let mut req = base.clone();
+        req.file = member.dir.to_string_lossy().into_owned();
+        req.package_root = Some(member.dir.clone());
+        let outcome = prepublish(config, &req).await?;
+        outcomes.push(outcome);
+    }
+    Ok(outcomes)
+}
+
+fn select_publishable<'a>(
+    ws: &'a crate::workspace::Workspace,
+    filter: &[String],
+) -> Result<Vec<&'a crate::workspace::Member>> {
+    let selected = ws.filtered_members(filter)?;
+    Ok(selected
+        .into_iter()
+        .filter(|m| {
+            if !m.manifest.publishable() {
+                log::info!("skip {}: publish is false", m.manifest.name);
+                false
+            } else {
+                true
+            }
+        })
+        .collect())
+}
+
 /// Shared validation for publish and prepublish.
 async fn validate_and_prepare(
     config: &Config,

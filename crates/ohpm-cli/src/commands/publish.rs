@@ -24,6 +24,15 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
     let client = RegistryClient::from_config(&config)?;
 
     let cwd = std::env::current_dir()?;
+
+    let batch = args.workspace || !args.filter.is_empty();
+    if batch {
+        if args.file.is_some() {
+            anyhow::bail!("--workspace/--filter cannot be combined with a file argument.");
+        }
+        return run_workspace(&client, &config, args, &cwd).await;
+    }
+
     let (input, package_root) = resolve_input(args.file.as_deref(), &cwd)?;
 
     let req = PublishRequest {
@@ -44,6 +53,47 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
     output::succeed(&format!("+{} {}", outcome.name, outcome.version));
     if let Some(msg) = outcome.additional_msg {
         output::output(&msg);
+    }
+    Ok(())
+}
+
+/// Publish every (filtered, publishable) workspace member.
+async fn run_workspace(
+    client: &RegistryClient,
+    config: &ohpm_core::config::Config,
+    args: &PublishArgs,
+    cwd: &std::path::Path,
+) -> Result<()> {
+    let ws = ohpm_core::workspace::Workspace::find(cwd)?.ok_or_else(|| {
+        anyhow!(
+            "No {} found walking up from the current directory; --workspace/--filter require a \
+             workspace.",
+            ohpm_core::workspace::WORKSPACE_CONFIG
+        )
+    })?;
+    let base = PublishRequest {
+        tag: args.tag.clone(),
+        publish_registry: args.publish_registry.clone(),
+        login: LoginOverrides {
+            publish_id: args.publish_id.clone(),
+            key_path: args.key_path.clone(),
+            key_content: args.key_content.clone(),
+            passphrase: args.passphrase.clone(),
+        },
+        timeout: args.timeout,
+        ..Default::default()
+    };
+    let outcomes = publish::publish_workspace(client, config, &ws, &args.filter, &base).await?;
+    for outcome in &outcomes {
+        output::succeed(&format!("+{} {}", outcome.name, outcome.version));
+        if let Some(msg) = &outcome.additional_msg {
+            output::output(msg);
+        }
+    }
+    if !outcomes.is_empty() {
+        output::succeed(&format!("published {} package(s)", outcomes.len()));
+    } else {
+        output::output("no package was published (all selected members are publish: false)");
     }
     Ok(())
 }
