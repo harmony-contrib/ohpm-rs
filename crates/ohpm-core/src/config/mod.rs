@@ -8,6 +8,7 @@
 pub mod default;
 pub mod env;
 pub mod loader;
+pub mod type_validate;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,9 +22,14 @@ use self::default::{access_token_type, types, ConfigValue};
 /// CLI flags win over `OHPM_*` env vars, which win over `.ohpmrc` files.
 pub const SOURCE_ORDER: [&str; 6] = ["cli", "env", "cwd", "project", "user", "default"];
 
+/// One `config list` section: `(source, label, entries)`.
+pub type ConfigSection = (&'static str, String, Vec<(String, ConfigValue)>);
+
 pub struct Config {
     /// source name -> (key -> value)
     data: BTreeMap<String, BTreeMap<String, ConfigValue>>,
+    /// source name -> config file path (for the `config list` header lines).
+    source_paths: BTreeMap<String, PathBuf>,
     user_rc_path: PathBuf,
     loaded: bool,
 }
@@ -33,6 +39,7 @@ impl Config {
         let data = SOURCE_ORDER.iter().map(|s| (s.to_string(), BTreeMap::new())).collect();
         Self {
             data,
+            source_paths: BTreeMap::new(),
             user_rc_path: Self::user_rc_path(),
             loaded: false,
         }
@@ -101,8 +108,41 @@ impl Config {
 
     fn load_file(&mut self, source: &str, path: &Path) -> Result<()> {
         let map = loader::read_file(path)?;
+        self.source_paths.insert(source.to_string(), path.to_path_buf());
         self.data.get_mut(source).unwrap().extend(map);
         Ok(())
+    }
+
+    /// The label shown for a source in `config list`
+    /// (`; "cli" config from command line options`).
+    pub fn source_label(&self, source: &str) -> String {
+        match source {
+            "cli" => "command line options".to_string(),
+            "default" => "default".to_string(),
+            "cwd" | "project" | "user" | "env" => self
+                .source_paths
+                .get(source)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| source.to_string()),
+            other => other.to_string(),
+        }
+    }
+
+    /// Per-source key/value sections in precedence order, for `config list`.
+    /// Values are the raw (un-overridden) entries of each source.
+    pub fn list_sections(&self) -> Vec<ConfigSection> {
+        SOURCE_ORDER
+            .iter()
+            .filter_map(|source| {
+                let map = self.data.get(*source)?;
+                if map.is_empty() {
+                    return None;
+                }
+                let entries: Vec<(String, ConfigValue)> =
+                    map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                Some((*source, self.source_label(source), entries))
+            })
+            .collect()
     }
 
     /// Get a config value from the highest-precedence source that has it.
@@ -163,10 +203,22 @@ impl Config {
             .insert(key.to_string(), ConfigValue::from(value));
     }
 
-    /// Set a value in the user config. Token keys (ending in `:_auth` /
-    /// `:_read_auth`) additionally update the internal auth-record index,
-    /// mirroring `TypeValidate.js`.
-    pub fn set(&mut self, key: &str, value: &str) {
+    /// Set a value in the user config, validating it first (mirroring
+    /// `TypeValidate.js`). Invalid values are rejected with a warning and
+    /// `false` is returned. Token keys (ending in `:_auth` / `:_read_auth`)
+    /// additionally update the internal auth-record index.
+    pub fn set(&mut self, key: &str, value: &str) -> bool {
+        if let Some(msg) = type_validate::validate(key, value) {
+            if msg.starts_with("Invalid key") {
+                log::warn!("{msg}");
+            } else {
+                log::warn!(
+                    "invalid config: {key}={value:?} set in {}{msg}",
+                    self.user_rc_path.display()
+                );
+            }
+            return false;
+        }
         let user = self.data.get_mut("user").unwrap();
         let cv = ConfigValue::from(value);
         if key.ends_with(access_token_type::READ_WRITE) || key.ends_with(access_token_type::READ) {
@@ -193,6 +245,7 @@ impl Config {
             user.insert(suffix.to_string(), ConfigValue::String(records.join(",")));
         }
         user.insert(key.to_string(), cv);
+        true
     }
 
     /// Delete a key from the user config.
