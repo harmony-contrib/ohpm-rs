@@ -213,6 +213,27 @@ publishable**:
 entirely; `publish: false` keeps it a member (so others can still depend on it
 via `file:`) but marks it non-publishable.
 
+## Publishing to crates.io
+
+Both crates are publish-ready (`cargo publish --dry-run -p ohpm-core` passes
+clean; `ohpm-cli` needs `ohpm-core` on crates.io first):
+
+```sh
+cargo login                 # once, with your crates.io API token
+cargo publish -p ohpm-core  # library first
+cargo publish -p ohpm-cli    # then the CLI (path dep is rewritten to the version)
+```
+
+Notes:
+
+- The crates are **unlicensed** (all rights reserved). crates.io rejects
+  `license = "UNLICENSED"` (not a valid SPDX expression), so each crate ships
+  its own `LICENSE` file via `license-file`.
+- Publishing order matters: `ohpm-cli` depends on `ohpm-core` by version, so
+  the library must be published first.
+- `crates/ohpm-core/examples/wsprobe.rs` is included in the package — a
+  read-only workspace probe (`cargo run -p ohpm-core --example wsprobe -- <dir>`).
+
 ## Notes on fidelity
 
 - Upload paths: packages above `use_stream_threshold_size` (default 5 MB) go
