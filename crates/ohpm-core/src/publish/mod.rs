@@ -232,6 +232,13 @@ async fn validate_and_prepare(
     let har_pkg = validate::get_pkg_content(&har_path)?;
     validate::validate_pkg_size(&har_pkg)?;
     validate::validate_manifest_basics(&manifest)?;
+    validate::validate_name_suffix(&manifest.name)?;
+    validate::validate_field_lengths(&manifest)?;
+    // Dependency specs must be publishable (no bare local paths, no
+    // `file:../`, valid tags, spec length <= 128). Runs after the workspace
+    // rewrite so resolved `file:` deps already became versions.
+    validate::validate_dependency_specs(&manifest.dependencies)?;
+    validate::validate_dependency_specs(&manifest.dynamic_dependencies)?;
 
     let mut hsp_pkg = None;
     if is_tgz {

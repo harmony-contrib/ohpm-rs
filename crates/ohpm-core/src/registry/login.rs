@@ -385,7 +385,8 @@ async fn post_login(
     let url = format!("{}{}", crate::config::ensure_trailing_slash(registry), endpoint);
     let body = serde_json::json!({
         "publishId": publish_id,
-        "timestamp": timestamp.to_string(),
+        // The reference sends `Date.now()` — a number, not a string.
+        "timestamp": timestamp,
         "nonce": nonce,
         "signature": signature,
         "version": constants::LOGIN_REQUEST_VERSION,
