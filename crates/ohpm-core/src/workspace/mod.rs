@@ -270,6 +270,8 @@ fn is_excluded(root: &Path, dir: &Path, name: &str, exclude: &[String]) -> bool 
         return true;
     }
     let rel = dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().into_owned();
+    // Glob patterns use '/' separators; normalize the path on Windows.
+    let rel = rel.replace('\\', "/");
     exclude.iter().any(|e| {
         glob::Pattern::new(e)
             .map(|p| p.matches(&rel))

@@ -177,13 +177,13 @@ fn collect_files(source: &Path, matcher: &IgnoreMatcher) -> Result<Vec<(String, 
     if let Ok(canon) = source.canonicalize() {
         chain.push(canon);
     }
-    walk(source, Path::new(""), matcher, &mut out, &mut chain)?;
+    walk(source, "", matcher, &mut out, &mut chain)?;
     Ok(out.into_iter().collect())
 }
 
 fn walk(
     dir: &Path,
-    prefix: &Path,
+    prefix: &str,
     matcher: &IgnoreMatcher,
     out: &mut BTreeMap<String, PathBuf>,
     chain: &mut Vec<PathBuf>,
@@ -199,7 +199,12 @@ fn walk(
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let rel = prefix.join(&name).to_string_lossy().into_owned();
+        // Tar entries must use '/' separators on every platform.
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         let meta = std::fs::symlink_metadata(&path)?;
 
         if meta.file_type().is_symlink() {
@@ -219,7 +224,7 @@ fn walk(
                     continue;
                 }
                 chain.push(target.clone());
-                walk(&target, Path::new(&rel), matcher, out, chain)?;
+                walk(&target, &rel, matcher, out, chain)?;
                 chain.pop();
             } else {
                 if excluded_file(&name) || matcher.is_ignored(&rel) {
@@ -231,7 +236,7 @@ fn walk(
             if EXCLUDED_DIRS.contains(&name.as_str()) || matcher.is_ignored(&format!("{rel}/")) {
                 continue;
             }
-            walk(&path, Path::new(&rel), matcher, out, chain)?;
+            walk(&path, &rel, matcher, out, chain)?;
         } else {
             if excluded_file(&name) || matcher.is_ignored(&rel) {
                 continue;
