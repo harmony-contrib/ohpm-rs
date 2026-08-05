@@ -1,8 +1,11 @@
-//! `ohpm version [<newversion> | major | minor | patch] [--workspace] [--filter <pkgs>]`.
+//! `ohpm version [<action>] [--workspace] [--filter <pkgs>] [--preid <id>]`.
 //!
 //! Unified mode (bump every member to the same version) is triggered by
 //! `--workspace`, or by `version.mode: unified` in `ohpm-workspace.yaml`. Otherwise
 //! only the package containing the current directory is bumped (independent).
+//!
+//! With no action, `--preid` implies `prerelease` and a bare `ohpm version`
+//! prints the current version(s).
 
 use anyhow::{anyhow, Result};
 use ohpm_core::config::find_local_prefix;
@@ -18,13 +21,6 @@ use crate::cli::VersionArgs;
 pub async fn run(args: &VersionArgs) -> Result<()> {
     let _config = load_config()?;
     let cwd = std::env::current_dir()?;
-    let action = args.action.as_deref().ok_or_else(|| {
-        anyhow!(
-            "Usage: ohpm version [--workspace] [--filter <pkgs>] [--preid <id>] \
-             [<newversion> | major | minor | patch | pre* | prerelease]"
-        )
-    })?;
-    let preid = args.preid.as_deref();
 
     let ws = Workspace::find(&cwd)?;
     let force_unified = args.workspace
@@ -32,6 +28,17 @@ pub async fn run(args: &VersionArgs) -> Result<()> {
             .as_ref()
             .map(|w| w.version_mode == VersionMode::Unified)
             .unwrap_or(false);
+
+    // Without an action: `--preid` implies `prerelease`, otherwise just show
+    // the current version(s).
+    let action = match args.action.as_deref() {
+        Some(a) => a,
+        None if args.preid.is_some() => "prerelease",
+        None => {
+            return show_current(&cwd, &ws, force_unified);
+        }
+    };
+    let preid = args.preid.as_deref();
 
     if force_unified {
         let ws = ws.ok_or_else(|| {
@@ -68,6 +75,31 @@ fn run_unified(ws: &Workspace, action: &str, filter: &[String], preid: Option<&s
     } else {
         output::succeed(&format!("updated {} package(s) to {new_version}", bumped.len()));
     }
+    Ok(())
+}
+
+/// Print the current version(s) without bumping (`ohpm version` with no action).
+fn show_current(
+    cwd: &std::path::Path,
+    ws: &Option<Workspace>,
+    unified: bool,
+) -> Result<()> {
+    if unified {
+        if let Some(ws) = ws {
+            for member in &ws.members {
+                output::output(&format!("{}@{}", member.manifest.name, member.manifest.version));
+            }
+            return Ok(());
+        }
+    }
+    let local = find_local_prefix(cwd)
+        .ok_or_else(|| anyhow!("No {} found in the current directory.", MY_PACKAGE_JSON))?;
+    let path = local.join(MY_PACKAGE_JSON);
+    let text = std::fs::read_to_string(&path)?;
+    let doc: serde_json::Value = json5::from_str(&text)?;
+    let name = doc["name"].as_str().unwrap_or_default();
+    let version = doc["version"].as_str().unwrap_or_default();
+    output::output(&format!("{name}@{version}"));
     Ok(())
 }
 

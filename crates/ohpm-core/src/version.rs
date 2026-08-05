@@ -267,14 +267,26 @@ pub fn resolve_new_version(base: &str, action: &str, preid: Option<&str>) -> Res
         _ => None,
     };
     next.ok_or_else(|| {
+        // Helpful hint: `--preid prerelease beta` — the action was passed to
+        // --preid and a preid-like string became the action.
+        let hint = match preid {
+            Some(p) if is_action_name(p) => format!(
+                " (note: \"{p}\" looks like an action — did you mean `ohpm version {p} --preid {action}`?)"
+            ),
+            _ => String::new(),
+        };
         OhpmError::new(
             "InvalidVersionAction",
             format!(
                 "The argument \"{action}\" is invalid. Use major, minor, patch, premajor, preminor, \
-                 prepatch, prerelease, or a valid semantic version."
+                 prepatch, prerelease, or a valid semantic version.{hint}"
             ),
         )
     })
+}
+
+fn is_action_name(s: &str) -> bool {
+    matches!(s, "major" | "minor" | "patch" | "premajor" | "preminor" | "prepatch" | "prerelease")
 }
 
 /// Read the `oh-package.json5` at `path`, set its `version` to `new_version`,
@@ -443,6 +455,14 @@ mod tests {
         // invalid preid
         assert!(resolve_new_version("1.0.0", "prerelease", Some("0beta!")).is_err());
         assert!(resolve_new_version("1.0.0", "prerelease", Some("01")).is_err());
+    }
+
+    #[test]
+    fn swapped_preid_action_hint() {
+        // `version --preid prerelease beta`: the action was swallowed by --preid.
+        let err = resolve_new_version("1.0.0", "beta", Some("prerelease")).unwrap_err();
+        assert_eq!(err.code, "InvalidVersionAction");
+        assert!(err.message.contains("ohpm version prerelease --preid beta"));
     }
 
     #[test]
