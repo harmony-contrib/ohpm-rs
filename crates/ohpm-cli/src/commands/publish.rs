@@ -27,7 +27,7 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
         login: LoginOverrides {
             publish_id: args.publish_id.clone(),
             key_path: args.key_path.clone(),
-            passphrase: None, // publish only reads the passphrase from env/config
+            passphrase: args.passphrase.clone(), // or OHPM_KEY_PASSPHRASE / key_passphrase
         },
         timeout: args.timeout,
         package_root: package_source_root(&args.file),

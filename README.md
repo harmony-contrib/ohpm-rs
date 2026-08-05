@@ -64,6 +64,11 @@ All auth inputs are read from `OHPM_*` environment variables, which override
 | `OHPM_PUBLISH_REGISTRY` | Publish registry override. |
 | `OHPM_STRICT_SSL`, `OHPM_CA_FILES`, `OHPM_HTTP(S)_PROXY`, `OHPM_NO_PROXY`, `OHPM_LOG_LEVEL`, `OHPM_FETCH_TIMEOUT` | Network / logging overrides. |
 
+The SSH-login values can also be passed as CLI flags: `publish` and `login`
+accept `--publish_id`, `--key_path` and `--passphrase` (prefer
+`OHPM_KEY_PASSPHRASE` in CI — command-line arguments are visible in the
+process list).
+
 ### Auth resolution for `publish` (write)
 
 1. `OHPM_ACCESS_TOKEN`

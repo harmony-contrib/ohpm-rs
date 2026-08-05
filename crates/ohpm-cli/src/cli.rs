@@ -56,6 +56,10 @@ pub struct PublishArgs {
     /// The private SSH key path corresponding to the publish_id.
     #[arg(long = "key_path")]
     pub key_path: Option<String>,
+    /// The private key passphrase (prefer the OHPM_KEY_PASSPHRASE env var in
+    /// CI; this flag is visible in the process list).
+    #[arg(long)]
+    pub passphrase: Option<String>,
     /// Network request timeout in milliseconds.
     #[arg(long)]
     pub timeout: Option<u64>,
