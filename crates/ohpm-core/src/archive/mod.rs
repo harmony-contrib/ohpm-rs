@@ -139,6 +139,13 @@ pub fn read_entry_content(path: &Path, entry_path: &str) -> Result<Vec<u8>> {
 
 /// Find the `oh-package.json5` entry path inside an archive, accounting for
 /// the `package/` prefix.
+/// Find the package's own `oh-package.json5` inside an archive.
+///
+/// The package manifest lives at the archive root (shallowest entry); nested
+/// `oh-package.json5` files belong to bundled sub-packages (e.g. NAPI
+/// type-stub packages under `src/main/cpp/types/`, which ship their `.d.ts`
+/// with the har) and are ignored. Only multiple entries at the same depth are
+/// ambiguous.
 pub fn find_manifest_entry(path: &Path) -> Result<String> {
     let entries = list(path)?;
     let candidates: Vec<&str> = entries
@@ -146,12 +153,17 @@ pub fn find_manifest_entry(path: &Path) -> Result<String> {
         .filter(|e| e.path.ends_with(crate::constants::MY_PACKAGE_JSON) && !e.is_dir)
         .map(|e| e.path.as_str())
         .collect();
-    match candidates.len() {
-        1 => Ok(candidates[0].to_string()),
-        0 => Err(OhpmError::new(
+    if candidates.is_empty() {
+        return Err(OhpmError::new(
             "ManifestNotFound",
             format!("No {} found in \"{}\".", crate::constants::MY_PACKAGE_JSON, path.display()),
-        )),
+        ));
+    }
+    let depth = |p: &str| p.split('/').count();
+    let min_depth = candidates.iter().map(|p| depth(p)).min().unwrap();
+    let shallowest: Vec<&&str> = candidates.iter().filter(|p| depth(p) == min_depth).collect();
+    match shallowest.len() {
+        1 => Ok(shallowest[0].to_string()),
         _ => Err(OhpmError::new(
             "ManifestAmbiguous",
             format!("Multiple {} entries found in \"{}\".", crate::constants::MY_PACKAGE_JSON, path.display()),
@@ -182,6 +194,31 @@ mod tests {
         let enc = tar.into_inner().unwrap();
         enc.finish().unwrap();
         (dir, har_path)
+    }
+
+    #[test]
+    fn find_manifest_prefers_root_over_nested_stub() {
+        // A har with a root manifest plus a nested NAPI type-stub package.
+        let (dir, har) = build_har_with_manifest("com.example.a", "1.0.0");
+        let mut add = |rel: &str, content: &str| {
+            let src = dir.path().join("src");
+            std::fs::create_dir_all(src.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(src.join(rel), content).unwrap();
+            let f = File::create(&har).unwrap();
+            let enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            tar.append_dir_all("package", src.join("package")).unwrap();
+            let enc = tar.into_inner().unwrap();
+            enc.finish().unwrap();
+        };
+        add(
+            "package/src/main/cpp/types/libfoo/oh-package.json5",
+            "{ name: \"libfoo.so\", version: \"1.0.0\" }\n",
+        );
+        add("package/src/main/cpp/types/libfoo/Index.d.ts", "declare const x: number;\n");
+
+        let entry = find_manifest_entry(&har).unwrap();
+        assert_eq!(entry, "package/oh-package.json5", "the root manifest wins");
     }
 
     #[test]
