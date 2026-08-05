@@ -7,7 +7,7 @@ pub mod validate;
 use std::path::Path;
 
 use crate::archive;
-use crate::constants::{MY_PACKAGE_JSON, PM_VERSION};
+use crate::constants::MY_PACKAGE_JSON;
 use crate::error::{OhpmError, Result};
 
 pub use self::manifest::{Author, AuthorValue, Manifest};
@@ -37,10 +37,18 @@ pub fn read_manifest_from_archive(path: &Path, cache_dir: &Path) -> Result<Manif
 }
 
 /// Patch the manifest with tool versions, mirroring `patchManifest` in
-/// `publish/common.js`.
+/// `publish/common.js`. The registry requires `_ohpmVersion` in the published
+/// version metadata (`checkRegistry`), so this must run before the metadata
+/// is built.
 pub fn patch_manifest(m: &mut Manifest) {
-    let _ = m.extra.insert("_nodeVersion".into(), serde_json::json!("rust"));
-    m.extra.insert(format!("_{}", crate::constants::PM), serde_json::json!(PM_VERSION));
+    m.extra.insert(
+        "_nodeVersion".into(),
+        serde_json::json!(crate::constants::NODE_VERSION),
+    );
+    m.extra.insert(
+        format!("_{}Version", crate::constants::PM),
+        serde_json::json!(crate::constants::PM_VERSION),
+    );
 }
 
 /// Normalize the `author` field in place (string -> object).

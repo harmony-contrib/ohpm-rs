@@ -210,6 +210,14 @@ async fn publish_with_env_access_token() {
     assert_eq!(meta["dist-tags"]["latest"], "1.0.0");
     assert!(meta["versions"]["1.0.0"]["dist"]["integrity"].as_str().unwrap().starts_with("sha512-"));
     assert!(meta["versions"]["1.0.0"]["dist"]["tarball"].as_str().unwrap().contains("com.example.ci"));
+    // The registry requires the patched tool-version fields in the metadata.
+    let version = &meta["versions"]["1.0.0"];
+    assert!(
+        version["_ohpmVersion"].as_str().is_some_and(|v| !v.is_empty()),
+        "_ohpmVersion must be set"
+    );
+    assert!(version["_nodeVersion"].as_str().is_some_and(|v| !v.is_empty()));
+    assert_eq!(version["tag"], "latest");
     // internal fields must be cleared before upload
     assert!(meta.get("pkg").is_none());
 }

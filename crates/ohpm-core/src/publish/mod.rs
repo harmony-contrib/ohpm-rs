@@ -201,6 +201,10 @@ async fn validate_and_prepare(
 
     package::fix_author(&mut manifest)?;
 
+    // 3a. patch tool versions (`_nodeVersion`, `_ohpmVersion`) like the
+    // reference `patchManifest`; the registry requires `_ohpmVersion`.
+    package::patch_manifest(&mut manifest);
+
     // 3b. workspace mode: resolve `file:` dependencies before publishing so the
     // uploaded metadata never references local paths.
     let package_root = req
@@ -239,6 +243,9 @@ async fn validate_and_prepare(
     let size = har_pkg.size + hsp_pkg.as_ref().map(|p| p.size).unwrap_or(0);
     let file_num = har_pkg.entry_count + hsp_pkg.as_ref().map(|p| p.entry_count).unwrap_or(0);
     let tag = req.tag.clone().unwrap_or_else(|| constants::LATEST.to_string());
+    // The reference mutates the manifest with the tag (`getPublishOptions`),
+    // so the published version entry carries it.
+    manifest.tag = Some(tag.clone());
 
     Ok(PublishContext {
         manifest,

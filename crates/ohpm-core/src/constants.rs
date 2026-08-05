@@ -1,7 +1,19 @@
 //! Constants mirroring `lib/common/Constants.js`.
 
 pub const PM: &str = "ohpm";
-pub const PM_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The reference ohpm version this tool is wire-compatible with. The registry
+/// validates `_ohpmVersion` in the publish metadata and may gate the
+/// user-agent on known client versions, so the protocol identity uses the
+/// reference version (6.0.1, the DevEco Studio 6.1.1.280 bundle).
+pub const PM_VERSION: &str = "6.0.1";
+
+/// The reference's `RECOMMENDED_NODE_VERSION`, reported in `_nodeVersion` and
+/// the user-agent (there is no Node here, but the registry expects the field).
+pub const NODE_VERSION: &str = "18.0.0";
+
+/// This crate's own version, used for display (`--version`, `config list`).
+pub const PM_DISPLAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub const PM_RC_DIR: &str = "resources";
 pub const PM_RC: &str = ".ohpmrc";
@@ -44,7 +56,8 @@ pub const REQUEST_COMMAND: &str = "publish";
 pub const REQUEST_VERSION: &str = "v1";
 pub const LOGIN_REQUEST_VERSION: &str = "v1";
 
-/// Node user-agent components used in `getUserAgent()`: `ohpm/<ver> node/<node-ver>`.
+/// The registry user-agent, matching the reference format
+/// `ohpm/<version> node/<node-version>`.
 pub fn user_agent() -> String {
-    format!("{PM}/{PM_VERSION} rust/{}", std::env::consts::ARCH)
+    format!("{PM}/{PM_VERSION} node/{NODE_VERSION}")
 }

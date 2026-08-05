@@ -141,3 +141,18 @@ mod tests {
         assert_eq!(m.package_type(), "InterfaceHar");
     }
 }
+
+#[cfg(test)]
+mod flatten_tests {
+    use super::*;
+
+    #[test]
+    fn extra_flatten_serializes() {
+        let mut m = Manifest::default();
+        m.extra.insert("_ohpmVersion".into(), serde_json::json!("6.0.1"));
+        m.extra.insert("_nodeVersion".into(), serde_json::json!("18.0.0"));
+        let v = m.to_json();
+        assert_eq!(v["_ohpmVersion"], "6.0.1", "flattened extra must appear");
+        assert_eq!(v["_nodeVersion"], "18.0.0");
+    }
+}

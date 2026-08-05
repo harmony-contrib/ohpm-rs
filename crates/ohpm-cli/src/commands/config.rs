@@ -136,7 +136,7 @@ fn print_list(config: &Config, json: bool) {
     lines.push(format!("; node bin location = {}", std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default()));
     lines.push(format!("; node version = (rust {} {})", std::env::consts::ARCH, std::env::consts::OS));
     lines.push(format!("; {} local prefix = {home}", ohpm_core::constants::PM));
-    lines.push(format!("; {} version = {}", ohpm_core::constants::PM, ohpm_core::constants::PM_VERSION));
+    lines.push(format!("; {} version = {}", ohpm_core::constants::PM, ohpm_core::constants::PM_DISPLAY_VERSION));
     lines.push(format!("; cwd = {cwd}"));
     lines.push(format!("; HOME = {home}"));
 
