@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/ohpm-core", "crates/ohpm-cli"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # `UNLICENSED` is not a valid SPDX expression and crates.io rejects it; each
 # crate declares `license-file` (inside its own package dir) instead.
