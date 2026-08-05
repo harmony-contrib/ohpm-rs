@@ -75,6 +75,16 @@ pub fn extract(path: &Path, dest: &Path, strip: u32, file_list: Option<&[String]
         if let Some(parent) = out_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        if entry.header().entry_type().is_symlink() {
+            // Recreate the symlink rather than writing an empty file.
+            let target = entry.header().link_name()?.unwrap_or_default();
+            let _ = std::fs::remove_file(&out_path);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &out_path)?;
+            #[cfg(not(unix))]
+            std::fs::write(&out_path, b"")?;
+            continue;
+        }
         let mut f = File::create(&out_path)?;
         std::io::copy(&mut entry, &mut f)?;
         f.flush()?;
@@ -194,6 +204,38 @@ mod tests {
         let enc = tar.into_inner().unwrap();
         enc.finish().unwrap();
         (dir, har_path)
+    }
+
+    /// Symlink entries are recreated as symlinks on extraction, not as empty
+    /// files.
+    #[cfg(unix)]
+    #[test]
+    fn extract_recreates_symlinks() {
+        let dir = TempDir::new().unwrap();
+        let har = dir.path().join("s.har");
+        let f = File::create(&har).unwrap();
+        let enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+        let mut tar = tar::Builder::new(enc);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        tar.append_link(&mut header, "package/link", "target-file").unwrap();
+        let mut data_header = tar::Header::new_gnu();
+        data_header.set_size(4);
+        data_header.set_mode(0o644);
+        tar.append_data(&mut data_header, "package/real", &b"data"[..]).unwrap();
+        let enc = tar.into_inner().unwrap();
+        enc.finish().unwrap();
+
+        let dest = dir.path().join("out");
+        extract(&har, &dest, 1, None).unwrap();
+        let meta = std::fs::symlink_metadata(dest.join("link")).unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_link(dest.join("link")).unwrap(),
+            std::path::PathBuf::from("target-file")
+        );
+        assert_eq!(std::fs::read(dest.join("real")).unwrap(), b"data");
     }
 
     #[test]

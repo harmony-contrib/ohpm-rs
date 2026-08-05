@@ -165,17 +165,28 @@ pub fn pack(source: &Path, output_dir: &Path) -> Result<PackOutcome> {
 }
 
 /// Recursively collect the files to pack, sorted for deterministic output.
+///
+/// Symlinks are **resolved to real files**: the target's content is included
+/// under the symlink's path as a regular file, so the har always contains the
+/// actual data. The source files are never modified. Directory symlinks are
+/// followed with a cycle guard (a symlink pointing to a dir already on the
+/// current walk chain is skipped); broken symlinks are skipped with a warning.
 fn collect_files(source: &Path, matcher: &IgnoreMatcher) -> Result<Vec<(String, PathBuf)>> {
     let mut out = BTreeMap::new();
-    walk(source, source, matcher, &mut out)?;
+    let mut chain: Vec<PathBuf> = Vec::new();
+    if let Ok(canon) = source.canonicalize() {
+        chain.push(canon);
+    }
+    walk(source, Path::new(""), matcher, &mut out, &mut chain)?;
     Ok(out.into_iter().collect())
 }
 
 fn walk(
-    root: &Path,
     dir: &Path,
+    prefix: &Path,
     matcher: &IgnoreMatcher,
     out: &mut BTreeMap<String, PathBuf>,
+    chain: &mut Vec<PathBuf>,
 ) -> Result<()> {
     let entries = std::fs::read_dir(dir)?;
     let mut children: Vec<_> = entries
@@ -188,22 +199,41 @@ fn walk(
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
-        let is_dir = path.is_dir();
+        let rel = prefix.join(&name).to_string_lossy().into_owned();
+        let meta = std::fs::symlink_metadata(&path)?;
 
-        if is_dir {
-            if EXCLUDED_DIRS.contains(&name.as_str()) {
+        if meta.file_type().is_symlink() {
+            // Resolve the symlink to its target so the package contains the
+            // real file (the source symlink is left untouched).
+            let Some(target) = path.canonicalize().ok() else {
+                log::warn!("skip broken symlink {} while packing", path.display());
+                continue;
+            };
+            if target.is_dir() {
+                if EXCLUDED_DIRS.contains(&name.as_str()) || matcher.is_ignored(&format!("{rel}/"))
+                {
+                    continue;
+                }
+                if chain.iter().any(|c| c == &target) {
+                    log::warn!("skip cyclic symlink {} while packing", path.display());
+                    continue;
+                }
+                chain.push(target.clone());
+                walk(&target, Path::new(&rel), matcher, out, chain)?;
+                chain.pop();
+            } else {
+                if excluded_file(&name) || matcher.is_ignored(&rel) {
+                    continue;
+                }
+                out.insert(rel, target);
+            }
+        } else if meta.is_dir() {
+            if EXCLUDED_DIRS.contains(&name.as_str()) || matcher.is_ignored(&format!("{rel}/")) {
                 continue;
             }
-            if matcher.is_ignored(&format!("{rel}/")) {
-                continue;
-            }
-            walk(root, &path, matcher, out)?;
+            walk(&path, Path::new(&rel), matcher, out, chain)?;
         } else {
-            if excluded_file(&name) {
-                continue;
-            }
-            if matcher.is_ignored(&rel) {
+            if excluded_file(&name) || matcher.is_ignored(&rel) {
                 continue;
             }
             out.insert(rel, path);
@@ -286,6 +316,52 @@ mod tests {
         assert!(!paths.contains(&"package/src/bundle.js.map"));
         assert!(!paths.contains(&"package/docs/a.md"));
         assert!(paths.contains(&"package/docs/keep.md"), "negation must re-include");
+    }
+
+    /// Symlinks are resolved to real files in the package; cyclic and broken
+    /// symlinks are skipped without hanging or failing.
+    #[cfg(unix)]
+    #[test]
+    fn pack_resolves_symlinks_to_real_files() {
+        use std::os::unix::fs::symlink;
+        let src = TempDir::new().unwrap();
+        write(&src.path(), "oh-package.json5", "{ name: \"pkg.sym\", version: \"1.0.0\" }\n");
+        write(&src.path(), "real.txt", "real content\n");
+        write(&src.path(), "real_dir/x.txt", "x\n");
+        symlink("real.txt", src.path().join("alias.txt")).unwrap();
+        symlink("real_dir", src.path().join("alias_dir")).unwrap();
+        symlink(".", src.path().join("loop")).unwrap(); // cycle -> skipped
+        symlink("missing", src.path().join("broken")).unwrap(); // broken -> skipped
+
+        let out = TempDir::new().unwrap();
+        let result = pack(src.path(), out.path()).unwrap();
+
+        // Inspect the tar entry types: no symlink entries may remain.
+        let f = File::open(&result.har_path).unwrap();
+        let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(f));
+        let mut entries: BTreeMap<String, bool> = BTreeMap::new();
+        for e in ar.entries().unwrap() {
+            let e = e.unwrap();
+            entries.insert(
+                e.path().unwrap().to_string_lossy().into_owned(),
+                e.header().entry_type().is_symlink(),
+            );
+        }
+        assert_eq!(entries.get("package/alias.txt"), Some(&false), "file symlink -> regular file");
+        assert_eq!(
+            entries.get("package/alias_dir/x.txt"),
+            Some(&false),
+            "dir symlink -> real files under the symlink path"
+        );
+        assert!(!entries.keys().any(|p| p.contains("loop")), "cyclic symlink skipped");
+        assert!(!entries.keys().any(|p| p.contains("broken")), "broken symlink skipped");
+        assert!(!entries.values().any(|s| *s), "no symlink entries in the package");
+
+        // The resolved file carries the target's content (same size).
+        let listed = crate::archive::list(&result.har_path).unwrap();
+        let alias = listed.iter().find(|e| e.path == "package/alias.txt").unwrap();
+        let real = listed.iter().find(|e| e.path == "package/real.txt").unwrap();
+        assert_eq!(alias.size, real.size);
     }
 
     #[test]
