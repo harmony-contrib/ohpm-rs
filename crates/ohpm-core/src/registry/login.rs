@@ -144,13 +144,17 @@ fn load_private_key(ctx: &LoginContext) -> Result<RsaPrivateKey> {
     let passphrase = ctx.passphrase.as_str();
 
     let key = if pem.contains("BEGIN ENCRYPTED PRIVATE KEY") {
+        // PKCS#8 encrypted (modern OpenSSL default with -traditional absent).
         RsaPrivateKey::from_pkcs8_encrypted_pem(&pem, passphrase.as_bytes())
             .map_err(|e| signing_failed_with(&e.to_string()))?
-    } else if pem.contains("BEGIN PRIVATE KEY") || pem.contains("BEGIN RSA PRIVATE KEY") {
-        RsaPrivateKey::from_pkcs8_pem(&pem).or_else(|_| {
-            pkcs1::DecodeRsaPrivateKey::from_pkcs1_pem(&pem)
-                .map_err(|e| signing_failed_with(&e.to_string()))
-        })?
+    } else if pem.contains("BEGIN PRIVATE KEY") {
+        RsaPrivateKey::from_pkcs8_pem(&pem).map_err(|e| signing_failed_with(&e.to_string()))?
+    } else if pem.contains("BEGIN RSA PRIVATE KEY") {
+        // Traditional PKCS#1, possibly with the legacy OpenSSL encryption
+        // headers (`Proc-Type: 4,ENCRYPTED` + `DEK-Info:`).
+        let der = decrypt_traditional_pem(&pem, passphrase)?;
+        pkcs1::DecodeRsaPrivateKey::from_pkcs1_der(&der)
+            .map_err(|e| signing_failed_with(&e.to_string()))?
     } else {
         return Err(OhpmError::not_support_private_key(&source()));
     };
@@ -158,6 +162,150 @@ fn load_private_key(ctx: &LoginContext) -> Result<RsaPrivateKey> {
     // Validate the key really is RSA (the reference signs with RSA).
     let _: RsaPublicKey = key.to_public_key();
     Ok(key)
+}
+
+/// Legacy ciphers used by OpenSSL traditional encrypted PEM (`DEK-Info:`).
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::enum_variant_names)] // cipher names all end in "Cbc"
+enum LegacyCipher {
+    Aes128Cbc,
+    Aes192Cbc,
+    Aes256Cbc,
+    DesEde3Cbc,
+    DesCbc,
+}
+
+impl LegacyCipher {
+    fn parse(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_uppercase().as_str() {
+            "AES-128-CBC" => Self::Aes128Cbc,
+            "AES-192-CBC" => Self::Aes192Cbc,
+            "AES-256-CBC" => Self::Aes256Cbc,
+            "DES-EDE3-CBC" => Self::DesEde3Cbc,
+            "DES-CBC" => Self::DesCbc,
+            _ => return None,
+        })
+    }
+
+    fn key_len(&self) -> usize {
+        match self {
+            Self::Aes128Cbc => 16,
+            Self::Aes192Cbc => 24,
+            Self::Aes256Cbc => 32,
+            Self::DesEde3Cbc => 24,
+            Self::DesCbc => 8,
+        }
+    }
+
+    fn iv_len(&self) -> usize {
+        match self {
+            Self::Aes128Cbc | Self::Aes192Cbc | Self::Aes256Cbc => 16,
+            Self::DesEde3Cbc | Self::DesCbc => 8,
+        }
+    }
+
+    fn decrypt(self, key: &[u8], iv: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+        use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+        let mut buf = data.to_vec();
+        let plain = match self {
+            Self::Aes128Cbc => cbc::Decryptor::<aes::Aes128>::new_from_slices(key, iv).ok()?
+                .decrypt_padded_mut::<Pkcs7>(&mut buf).ok()?,
+            Self::Aes192Cbc => cbc::Decryptor::<aes::Aes192>::new_from_slices(key, iv).ok()?
+                .decrypt_padded_mut::<Pkcs7>(&mut buf).ok()?,
+            Self::Aes256Cbc => cbc::Decryptor::<aes::Aes256>::new_from_slices(key, iv).ok()?
+                .decrypt_padded_mut::<Pkcs7>(&mut buf).ok()?,
+            Self::DesEde3Cbc => cbc::Decryptor::<des::TdesEde3>::new_from_slices(key, iv).ok()?
+                .decrypt_padded_mut::<Pkcs7>(&mut buf).ok()?,
+            Self::DesCbc => cbc::Decryptor::<des::Des>::new_from_slices(key, iv).ok()?
+                .decrypt_padded_mut::<Pkcs7>(&mut buf).ok()?,
+        };
+        Some(plain.to_vec())
+    }
+}
+
+/// OpenSSL `EVP_BytesToKey` with MD5 and count 1 (the legacy PEM KDF): the
+/// key+IV are built by repeatedly hashing `D_i = MD5(D_{i-1} || passphrase ||
+/// salt)`, where the salt is the first 8 bytes of the IV.
+fn evp_bytes_to_key_md5(passphrase: &[u8], salt: &[u8], key_len: usize, iv_len: usize) -> (Vec<u8>, Vec<u8>) {
+    use md5::{Digest, Md5};
+    let mut derived = Vec::new();
+    let mut prev: Vec<u8> = Vec::new();
+    while derived.len() < key_len + iv_len {
+        let mut h = Md5::new();
+        h.update(&prev);
+        h.update(passphrase);
+        h.update(salt);
+        prev = h.finalize().to_vec();
+        derived.extend_from_slice(&prev);
+    }
+    (
+        derived[..key_len].to_vec(),
+        derived[key_len..key_len + iv_len].to_vec(),
+    )
+}
+
+/// Decrypt a traditional encrypted PKCS#1 PEM (OpenSSL legacy format with
+/// `Proc-Type: 4,ENCRYPTED` / `DEK-Info: <cipher>,<hex-iv>` headers) into the
+/// PKCS#1 DER private key.
+fn decrypt_traditional_pem(pem: &str, passphrase: &str) -> Result<Vec<u8>> {
+    let mut dek_info: Option<(LegacyCipher, Vec<u8>)> = None;
+    let mut body = String::new();
+    for line in pem.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("DEK-Info:") {
+            let rest = rest.trim();
+            let (cipher, iv_hex) = rest.split_once(',').ok_or_else(|| {
+                signing_failed_with("malformed DEK-Info header in the private key PEM")
+            })?;
+            let cipher = LegacyCipher::parse(cipher.trim()).ok_or_else(|| {
+                OhpmError::new(
+                    "UnsupportedKeyCipher",
+                    format!(
+                        "The private key uses the unsupported legacy cipher \"{}\" (supported: \
+                         AES-128/192/256-CBC, DES-EDE3-CBC, DES-CBC).",
+                        cipher.trim()
+                    ),
+                )
+            })?;
+            let iv = decode_hex(iv_hex.trim()).ok_or_else(|| {
+                signing_failed_with("malformed DEK-Info IV in the private key PEM")
+            })?;
+            dek_info = Some((cipher, iv));
+        } else if !line.starts_with("-----") && !line.starts_with("Proc-Type:") {
+            body.push_str(line);
+        }
+    }
+    let (cipher, iv) = dek_info.ok_or_else(|| {
+        OhpmError::new(
+            "NotSupportPrivateKey",
+            "The traditional PKCS#1 private key is not encrypted (no DEK-Info header); only \
+             encrypted private keys are supported.",
+        )
+    })?;
+
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(body.as_bytes())
+        .map_err(|e| signing_failed_with(&e.to_string()))?;
+
+    // The KDF salt is the first 8 bytes of the IV (OpenSSL legacy behavior);
+    // the CBC IV itself is the full DEK-Info IV.
+    let salt = &iv[..iv.len().min(8)];
+    let (key, _derived_iv) =
+        evp_bytes_to_key_md5(passphrase.as_bytes(), salt, cipher.key_len(), cipher.iv_len());
+    cipher
+        .decrypt(&key, &iv, &data)
+        .ok_or_else(|| OhpmError::new("SignatureFailed", "Failed to decrypt the private key — the \
+                                      passphrase is likely incorrect."))
+}
+
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 /// Validate the key material locally (readable + parseable with the given
@@ -361,6 +509,117 @@ mod tests {
         let sig = default_signature(&key, msg);
         assert!(!sig.starts_with("SHA256withRSA/PSS:"));
         assert!(verify_signature(&pub_pem, msg, &sig, false));
+    }
+
+/// Traditional encrypted PKCS#1 PEM generated with
+    /// `openssl genrsa -traditional -aes256` (passphrase "test-pass").
+    const TRAD_AES256: &str = concat!(
+        "-----BEGIN RSA PRIVATE KEY-----\n",
+        "Proc-Type: 4,ENCRYPTED\n",
+        "DEK-Info: AES-256-CBC,B27B5A83FCBD739CEE15E5D0CE221AC5\n",
+        "\n",
+        "8ZoxYtVFVE9RM1cz3+XKTWd21K71/wdKHD6LRL8xKYdrHHP7dMzFvEKMIo3N3jB+\n",
+        "+VXNyk9fftTcMlJhIKVjEno23mgRzTiBlaPeZc1HeWgtD4Fb4glAKUqJDPtMhuh5\n",
+        "H6IWj2Up1WFh6Yc5NRyUdFVWHdE++c+ZEs/o9Pd4k87nX2+LBOBWrJiwdbXs0kWV\n",
+        "2jw7co1SgoklfVEKaYz055JoS2IZlae7mHXXUiM//Fn6I4eFNV0LM4JCnIbTzybU\n",
+        "rhSii0n7+18vBk9pT1cdYKIjqJEgZWEOgF5zDdU8H2I5Tf8Gyr0UG1H5XBucuXLr\n",
+        "a4d5UnpS5GvzXMchBMtmbb6LeiREE5HAYOCqlQOGK5tOuX/iiAZH5TLHhRvJG7BT\n",
+        "X6M0uTFioC9qET6YjNJT6N16otxneGIB5vMgNNJg6TRN601+8Fmkhsmnaiaa80ZL\n",
+        "FyyaCJ6OfbjHDLRxdTGBRvjbZhb/w5S2aaN3aoQttYGkyE+4OtkhnsDNSH9tk1Jo\n",
+        "fizh0H3j9iaItOyQdJVIXRv+YLqM2gTMPOGQppXne1eW5i7nFhFsJqSVqY+HuvDX\n",
+        "1HkxOje0HNt9slkfcOlc1Ulus145AGLRfgX6Ht7cOZ2rRsE0/xymXk0JaqIKwChg\n",
+        "Xn8dDB82InQzZk8Ofl+dLb4zGATh8kIh2Tt5GsZ6P/9J+4WG6T89SxGIuj0FNG0C\n",
+        "/VNkmsYQl303o5lxkuiII1TdtvR1DtiK/p93j2dnqIsg/ZoqiuBfcn0F4Jj7npqw\n",
+        "bDTL7UQvSG1oMeHrgjzY1c0zwZIDLkxgtpKL2GtMpvAr/+F/pX2kOjxIGas47qgC\n",
+        "U4ApjtKQKpBwEs0zK6AAvDkLi8y1xOoNxVEmkGGcwvITVp8qW6ytqiaKp3XxPZ5z\n",
+        "/DstR6NZjZ7wPwxMvRbnGmi8vGetwfVXBD/hhhjbfiwW77WwP7ALue78yi+63O38\n",
+        "QwlVbRPxUk4aTFUZ+nSeDspZvOC3GQpEqAYA631OMjEXZ4PRtlqFhO8FtEn5unvK\n",
+        "sB8YEALJ80OyHdcKjeCd4Zvn4hhQ+ph/QY40iNpCpmRN6E6HVva48s4Sk0jLFgJ/\n",
+        "ZC3FAwQnnk9XSB/yjrFLRv8bW/5sQeBdf98Glo91V7C/Mhl/4KPnlRX79zbtT/Tw\n",
+        "zNvRPVNj7g49YyB6spW98zLzhMB3HZuOfiHwX9mXgjm1pVoiyafS6YobRAwaVJoL\n",
+        "JaLdxlEc0NHXzKTY1B7eraZXz0Q98AFj4ohS78ZT+VosVppXVGBhfekIlyyrkxNr\n",
+        "fC57uAtyr38CieYLNPiuNuUFC9MCsQdVn7t9RgM+MGy01QC5aoZZzpzjMW77zApy\n",
+        "GLlEqiDFx2rbMvBtlGx1nAwPUNn+4ga83/P9DsGYVwiDuVH3hYTkbZl/tK40uiRA\n",
+        "UsExvx3IR/ziLKRYIlSmu2YtxpCcz1s3iCWzGhJFEtQv5VF93HIu24rBa6Biw9VG\n",
+        "tZ9iMwtlNhfubjPbTVysaaAaLAS0J56NjV14hMqQvaZN/VR0pj2rY1dLlh9wS0Jh\n",
+        "b8G8coANSX1tcUiSly8A+oFrSnVLBSnO9HLFsZQ8pt0NIG8qmEXCHdKHM3UxGyKK\n",
+        "-----END RSA PRIVATE KEY-----\n",
+    );
+
+/// Same key encrypted with `openssl genrsa -traditional -des3`.
+    const TRAD_3DES: &str = concat!(
+        "-----BEGIN RSA PRIVATE KEY-----\n",
+        "Proc-Type: 4,ENCRYPTED\n",
+        "DEK-Info: DES-EDE3-CBC,51662F6ADADF20EF\n",
+        "\n",
+        "wFoz1L8O0q4/qZ4yzhvITmXEuZsYwVEQGADosIaUJqJCCiM4PgzGcS8yiAl9GypN\n",
+        "hG69VOvUB38mjfhQLiNGlh3Hrwy3qYlqdrVYvC5ZCYbH+VB2DJ8Ou63h0dbmVGYm\n",
+        "Gt0nAZgy6OPCnYiTNHPe1cg1PSXkSOBcibKIvO1/ksTBz5mIar37UQqPIkl3q88F\n",
+        "6EWEMb56S5esDmjrqmElkTXaEX9WD8vWcdDO98/IfexFxZMjXg5Ld2+T6TnDM7fY\n",
+        "dQV5y4s2RKrc2UxFONcUFR0QMl3BrMGB3UxPRC/orQ3xmq8wC0C1QTSMb/er+/ii\n",
+        "kghSuz2lFaOgAreAWSGsLA8YmU2hh6BirMCsbtsdS4duqz9QZuWh7dM9yzT37ycz\n",
+        "MuKV3zahZmFLdQAK3zkk50jN5h5jcQgQppygOIE2FhQjb0wXvjStz9WO98wyaagM\n",
+        "YNOcVGyw9+Y19fSYqfR7vTGO/ciG4UNAeJl6xDgJ7emaNs4kxidNtcSoxqkRyR7P\n",
+        "oxY/KfRvWjxtptg1DfGueSc09nt2729E73lVD+YdLQDLI+C8gUGWUhlJCdH+62a5\n",
+        "FInr8s126joHzDio5fzuurUwqJjcn6wTclcreYOR4YYovmfFbDksPiCqXGgLMwBN\n",
+        "o9RBxlBKtP1RHjprlMgsQJojybs3cLFrMZSaGa+H/DngDg1hfuJ0jirdJIPlkZKF\n",
+        "8T/jrP3yA3BDGd02qnO+GrprBTJQPojakzxfR5rA7hdltbR1FkVTGLoKBRi2YjrQ\n",
+        "7SULEqcevyfLALIlyhIrV496SdrJdvokcAdgw4ZQcQIdH0QUD/MZQU9K0Y1sbFdS\n",
+        "c/VA4HEsxasTyS9+PipP+nu0MS9NskXb9Q4L8BFC0Yr+uQAqXrCQnGweH/VAI+Gb\n",
+        "kq9iTZJU2Bx+QZcXmAQ+vSprNDMwBhnzO+trNhoZiDGLR7cSyiVXLY2bBLJ6gwW+\n",
+        "1ZDKjrzNJmMNmancIs5Vbf4kJlLxcOahGnN/YsTwH8cphRkf1bv+vvpq6nBMwnKg\n",
+        "AvUB6oX7DiPruehTxp9RGUKh3hgKdaGhnogHJKtg+jR+65ykEzshULJY+tYA7SGe\n",
+        "skAzNdhPGfA+EPCxQ+QHDhootW78QU17lmudIqQ15ymAZV2CtACD+TQqcyJ5Gr1a\n",
+        "xKGhFPT6DjYDvvVKHbbQBjWMIhL9BBLk6FD6yykkJoSFl1IIv4cGWH00iyE2tJfi\n",
+        "TnnUQVRPvp6Jsrh2hacuMAzezjrRi9vHEYU0E5+yRIAWcrvwawUrg9TwYloCFYzq\n",
+        "PSYbbOAPofR4BnEyLmNaSXNg0pYsF4uhJRT7xgs5CYEEamDQltZqBCD81lvmyrsh\n",
+        "0FGaMKI1S6g+R7qLgEbz7Ki0lOrMx0U/BC29M/HW/Vj9BWC5S/vJ33YCKhAY9g88\n",
+        "+KaZYjCAINdB4CgZJgS8vz2Ch/RhGasHz6x1vsAkNbClUFBnMn3Gf5BtPuYLwWv4\n",
+        "+n/wPu2g3gh3sog7NEX53Qn+As/jpEwA/QEcx8b50v6Fvta8SsmIlpBAjUHRmzXP\n",
+        "s7IizJtYK+wLX9n2m1Q5WgvxNYTCR4DinmH1QJdT2YFQlfpKdgLZAcsgBfxzYVJg\n",
+        "-----END RSA PRIVATE KEY-----\n",
+    );
+
+    #[test]
+    fn traditional_aes256_pem_decrypts_and_signs() {
+        let ctx = LoginContext {
+            publish_id: "pid".into(),
+            key_path: None,
+            key_content: Some(TRAD_AES256.to_string()),
+            passphrase: "test-pass".into(),
+        };
+        let key = super::load_private_key(&ctx).unwrap();
+        let msg = "v1-pid-1700000000000-abc";
+        let sig = pss_signature(&key, msg);
+        let pub_pem = key
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        assert!(verify_signature(&pub_pem, msg, &sig, true));
+    }
+
+    #[test]
+    fn traditional_3des_pem_decrypts() {
+        let ctx = LoginContext {
+            publish_id: "pid".into(),
+            key_path: None,
+            key_content: Some(TRAD_3DES.to_string()),
+            passphrase: "test-pass".into(),
+        };
+        let key = super::load_private_key(&ctx).unwrap();
+        let _: RsaPublicKey = key.to_public_key();
+    }
+
+    #[test]
+    fn traditional_pem_wrong_passphrase_errors() {
+        let ctx = LoginContext {
+            publish_id: "pid".into(),
+            key_path: None,
+            key_content: Some(TRAD_AES256.to_string()),
+            passphrase: "wrong".into(),
+        };
+        let err = super::load_private_key(&ctx).unwrap_err();
+        assert_eq!(err.code, "SignatureFailed");
     }
 
     #[test]

@@ -562,6 +562,72 @@ async fn publish_dry_run_skips_network() {
     assert!(cap.attachment.is_empty());
 }
 
+/// Traditional encrypted PKCS#1 keys (`BEGIN RSA PRIVATE KEY` + `DEK-Info:`)
+/// are decrypted and the full login+publish flow runs.
+#[tokio::test]
+async fn publish_with_traditional_encrypted_key() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = EnvGuard::new();
+    let (registry, capture) = spawn_mock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let har = build_har(dir.path(), "com.example.trad", "1.0.0");
+
+    // `openssl genrsa -traditional -aes256` output, passphrase "test-pass".
+    const TRAD_AES256: &str = concat!(
+        "-----BEGIN RSA PRIVATE KEY-----\n",
+        "Proc-Type: 4,ENCRYPTED\n",
+        "DEK-Info: AES-256-CBC,B27B5A83FCBD739CEE15E5D0CE221AC5\n",
+        "\n",
+        "8ZoxYtVFVE9RM1cz3+XKTWd21K71/wdKHD6LRL8xKYdrHHP7dMzFvEKMIo3N3jB+\n",
+        "+VXNyk9fftTcMlJhIKVjEno23mgRzTiBlaPeZc1HeWgtD4Fb4glAKUqJDPtMhuh5\n",
+        "H6IWj2Up1WFh6Yc5NRyUdFVWHdE++c+ZEs/o9Pd4k87nX2+LBOBWrJiwdbXs0kWV\n",
+        "2jw7co1SgoklfVEKaYz055JoS2IZlae7mHXXUiM//Fn6I4eFNV0LM4JCnIbTzybU\n",
+        "rhSii0n7+18vBk9pT1cdYKIjqJEgZWEOgF5zDdU8H2I5Tf8Gyr0UG1H5XBucuXLr\n",
+        "a4d5UnpS5GvzXMchBMtmbb6LeiREE5HAYOCqlQOGK5tOuX/iiAZH5TLHhRvJG7BT\n",
+        "X6M0uTFioC9qET6YjNJT6N16otxneGIB5vMgNNJg6TRN601+8Fmkhsmnaiaa80ZL\n",
+        "FyyaCJ6OfbjHDLRxdTGBRvjbZhb/w5S2aaN3aoQttYGkyE+4OtkhnsDNSH9tk1Jo\n",
+        "fizh0H3j9iaItOyQdJVIXRv+YLqM2gTMPOGQppXne1eW5i7nFhFsJqSVqY+HuvDX\n",
+        "1HkxOje0HNt9slkfcOlc1Ulus145AGLRfgX6Ht7cOZ2rRsE0/xymXk0JaqIKwChg\n",
+        "Xn8dDB82InQzZk8Ofl+dLb4zGATh8kIh2Tt5GsZ6P/9J+4WG6T89SxGIuj0FNG0C\n",
+        "/VNkmsYQl303o5lxkuiII1TdtvR1DtiK/p93j2dnqIsg/ZoqiuBfcn0F4Jj7npqw\n",
+        "bDTL7UQvSG1oMeHrgjzY1c0zwZIDLkxgtpKL2GtMpvAr/+F/pX2kOjxIGas47qgC\n",
+        "U4ApjtKQKpBwEs0zK6AAvDkLi8y1xOoNxVEmkGGcwvITVp8qW6ytqiaKp3XxPZ5z\n",
+        "/DstR6NZjZ7wPwxMvRbnGmi8vGetwfVXBD/hhhjbfiwW77WwP7ALue78yi+63O38\n",
+        "QwlVbRPxUk4aTFUZ+nSeDspZvOC3GQpEqAYA631OMjEXZ4PRtlqFhO8FtEn5unvK\n",
+        "sB8YEALJ80OyHdcKjeCd4Zvn4hhQ+ph/QY40iNpCpmRN6E6HVva48s4Sk0jLFgJ/\n",
+        "ZC3FAwQnnk9XSB/yjrFLRv8bW/5sQeBdf98Glo91V7C/Mhl/4KPnlRX79zbtT/Tw\n",
+        "zNvRPVNj7g49YyB6spW98zLzhMB3HZuOfiHwX9mXgjm1pVoiyafS6YobRAwaVJoL\n",
+        "JaLdxlEc0NHXzKTY1B7eraZXz0Q98AFj4ohS78ZT+VosVppXVGBhfekIlyyrkxNr\n",
+        "fC57uAtyr38CieYLNPiuNuUFC9MCsQdVn7t9RgM+MGy01QC5aoZZzpzjMW77zApy\n",
+        "GLlEqiDFx2rbMvBtlGx1nAwPUNn+4ga83/P9DsGYVwiDuVH3hYTkbZl/tK40uiRA\n",
+        "UsExvx3IR/ziLKRYIlSmu2YtxpCcz1s3iCWzGhJFEtQv5VF93HIu24rBa6Biw9VG\n",
+        "tZ9iMwtlNhfubjPbTVysaaAaLAS0J56NjV14hMqQvaZN/VR0pj2rY1dLlh9wS0Jh\n",
+        "b8G8coANSX1tcUiSly8A+oFrSnVLBSnO9HLFsZQ8pt0NIG8qmEXCHdKHM3UxGyKK\n",
+        "-----END RSA PRIVATE KEY-----\n",
+    );
+    let key_path = dir.path().join("trad-key.pem");
+    std::fs::write(&key_path, TRAD_AES256).unwrap();
+
+    std::env::set_var("OHPM_PUBLISH_ID", "trad-pid");
+    std::env::set_var("OHPM_KEY_PATH", key_path.to_string_lossy().into_owned());
+    std::env::set_var("OHPM_KEY_PASSPHRASE", "test-pass");
+    let config = load_config(dir.path());
+
+    let req = PublishRequest {
+        file: har.to_string_lossy().into_owned(),
+        publish_registry: Some(registry.clone()),
+        ..Default::default()
+    };
+    let client = RegistryClient::from_config(&config).unwrap();
+    publish(&client, &config, &req)
+        .await
+        .expect("publish with a traditional encrypted key should succeed");
+
+    let cap = capture.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(!cap.login_pss.is_empty(), "login happened with the traditional key");
+    assert_eq!(cap.attachment.len(), 1);
+}
+
 /// The SSH login context can be built from config too (no env).
 #[test]
 fn login_context_from_config_only() {

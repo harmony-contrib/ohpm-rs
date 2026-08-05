@@ -34,6 +34,10 @@ url.workspace = true
 log.workspace = true
 dirs.workspace = true
 glob.workspace = true
+md-5.workspace = true
+aes.workspace = true
+des.workspace = true
+cbc.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

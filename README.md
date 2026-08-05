@@ -59,6 +59,11 @@ All auth inputs are read from `OHPM_*` environment variables, which override
 | `OHPM_PUBLISH_ID` | Publish id for the SSH-key login flow. |
 | `OHPM_KEY_PATH` | Path to the encrypted private key for the login flow. |
 | `OHPM_KEY_CONTENT` | The private key PEM **content** directly — no file needed (CI secrets). Alternative to `OHPM_KEY_PATH`. |
+
+Key formats: PKCS#8 encrypted (`BEGIN ENCRYPTED PRIVATE KEY`), unencrypted
+PKCS#8/PKCS#1, and **traditional OpenSSL encrypted PKCS#1** (`BEGIN RSA
+PRIVATE KEY` with `Proc-Type: 4,ENCRYPTED` / `DEK-Info:` — AES-128/192/256-CBC,
+DES-EDE3-CBC, DES-CBC), all decrypted in pure Rust.
 | `OHPM_KEY_PASSPHRASE` | Private-key passphrase. **No interactive prompt is ever shown.** |
 | `OHPM_READ_ACCESS_TOKEN` | Read-only token (used by `info` / `ping`). |
 | `OHPM_REGISTRY` | Default registry override. |
