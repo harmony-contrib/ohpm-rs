@@ -51,14 +51,77 @@ pub fn get_root_node(
     }
     let text = std::fs::read_to_string(&path)?;
     let mut manifest = Manifest::from_json5(&text)?;
-    // `ParameterParsingChainManager.handle` — substitute the `@param:` markers.
-    if let Some(parameter) = parameter {
+    // `ParameterParsingChainManager.handle` — the `@module:` markers first,
+    // then the `@param:` substitution (the reference's chain order).
+    if let Some(project) = project {
+        let mut value = manifest.to_json();
+        parse_at_module(&mut value, project, module_root)?;
+        if let Some(parameter) = parameter {
+            parameter.parse_value(&manifest.name, &mut value)?;
+        }
+        let parsed: Manifest = serde_json::from_value(value)?;
+        manifest = parsed;
+    } else if let Some(parameter) = parameter {
         let mut value = manifest.to_json();
         parameter.parse_value(&manifest.name, &mut value)?;
         let parsed: Manifest = serde_json::from_value(value)?;
         manifest = parsed;
     }
     root_node_from_manifest(module_root, &manifest, link, project)
+}
+
+/// `ModuleParser.parseAtModuleOnPkgJson` — substitute the `@module:<name>`
+/// markers in the manifest's dependency maps: the spec becomes the module's
+/// directory (from the build-profile module map), and the module's package
+/// name must match the dependency key.
+pub fn parse_at_module(
+    value: &mut serde_json::Value,
+    project: &ProjectBuildProfile,
+    module_root: &Path,
+) -> Result<()> {
+    for key in ["dependencies", "devDependencies", "dynamicDependencies", "overrides"] {
+        let Some(v) = value.get_mut(key) else {
+            continue;
+        };
+        let Some(map) = v.as_object_mut() else {
+            continue;
+        };
+        let keys: Vec<String> = map.keys().cloned().collect();
+        for k in keys {
+            let mut child = map.get(&k).cloned().unwrap_or_default();
+            let Some(s) = child.as_str().map(|s| s.to_string()) else {
+                continue;
+            };
+            if !s.starts_with("@module:") {
+                continue;
+            }
+            let module = s.trim().strip_prefix("@module:").unwrap_or("").to_string();
+            let dir = project.get_module_path(&module).cloned().ok_or_else(|| {
+                OhpmError::new(
+                    "AtModuleModuleNameUnExistError",
+                    format!(
+                        "Configuration: \"{s}\" error in \"{}\", module name: \"{module}\" does not exist under the modules node in the file \"{}\".",
+                        module_root.join(MY_PACKAGE_JSON).display(),
+                        project.project_root.join(crate::constants::BUILD_PROFILE).display()
+                    ),
+                )
+            })?;
+            // `validConsistencyOfDepNameAndActualPkgName`.
+            let manifest = crate::package::read_manifest_from_dir(&dir)?;
+            if manifest.name != k {
+                return Err(OhpmError::new(
+                    "ParameterizationInconsistentDepNames",
+                    format!(
+                        "The local dependency \"{k}\" in \"{}\" does not match the actual name \"{}\"",
+                        dir.display(),
+                        manifest.name
+                    ),
+                ));
+            }
+            map.insert(k, serde_json::Value::String(dir.to_string_lossy().into_owned()));
+        }
+    }
+    Ok(())
 }
 
 /// The shared root-node construction: manifest -> root `NodeData`
@@ -468,5 +531,54 @@ mod tests {
             },
         );
         assert!(!update_pkg_json(&param, &root2.requirements, &opts, Some(&names2)).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod at_module_tests {
+    use super::*;
+
+    #[test]
+    fn module_marker_resolves_to_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let proj = dir.path().join("proj");
+        let lib1 = proj.join("lib1");
+        std::fs::create_dir_all(&lib1).unwrap();
+        std::fs::write(
+            lib1.join(MY_PACKAGE_JSON),
+            "{ name: \"lib1\", version: \"1.0.0\" }\n",
+        )
+        .unwrap();
+        let project = ProjectBuildProfile {
+            project_root: proj.clone(),
+            module_map: BTreeMap::from([("lib1".to_string(), lib1.clone())]),
+            ..Default::default()
+        };
+        let mut value: serde_json::Value = json5::from_str(
+            "{ dependencies: { \"lib1\": \"@module:lib1\" } }\n",
+        )
+        .unwrap();
+        parse_at_module(&mut value, &project, &proj).unwrap();
+        assert_eq!(
+            value["dependencies"]["lib1"],
+            serde_json::Value::String(lib1.to_string_lossy().into_owned())
+        );
+
+        // A missing module errors.
+        let mut value: serde_json::Value =
+            json5::from_str("{ dependencies: { \"nope\": \"@module:nope\" } }\n").unwrap();
+        let err = parse_at_module(&mut value, &project, &proj).unwrap_err();
+        assert_eq!(err.code, "AtModuleModuleNameUnExistError");
+
+        // A name mismatch errors.
+        std::fs::write(
+            lib1.join(MY_PACKAGE_JSON),
+            "{ name: \"other\", version: \"1.0.0\" }\n",
+        )
+        .unwrap();
+        let mut value: serde_json::Value =
+            json5::from_str("{ dependencies: { \"lib1\": \"@module:lib1\" } }\n").unwrap();
+        let err = parse_at_module(&mut value, &project, &proj).unwrap_err();
+        assert_eq!(err.code, "ParameterizationInconsistentDepNames");
     }
 }
