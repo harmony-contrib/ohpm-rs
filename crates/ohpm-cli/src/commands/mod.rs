@@ -63,18 +63,8 @@ pub fn apply_cli_options(
     if let Some(v) = registry {
         config.set_cli(types::REGISTRY, &ohpm_core::config::ensure_trailing_slash(v));
     }
-    validate_range("max_concurrent", 1, 200, config)?;
-    validate_range("retry_times", 0, 5, config)?;
-    validate_range("retry_interval", 1_000, 60_000, config)?;
-    Ok(())
-}
-
-/// `ConcurrentExecutor.check*` — parameter bounds.
-pub fn validate_range(key: &str, min: i64, max: i64, config: &Config) -> Result<()> {
-    let value = config.get_number(key);
-    if value < min || value > max {
-        return Err(anyhow!(OhpmError::executor_number_invalid(key, min, max)));
-    }
+    // The CLI option ranges are validated by `valid_cli_options` (per
+    // command, with the reference's messages) before the pipeline runs.
     Ok(())
 }
 

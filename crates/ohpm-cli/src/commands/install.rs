@@ -39,6 +39,8 @@ pub async fn run(args: &InstallArgs) -> Result<()> {
         retry_interval: args.retry_interval,
         ..Default::default()
     };
+    ohpm_core::install::valid_cli_options("install", &opts)?;
+
 
     let client = RegistryClient::from_config(&config)?;
     let outcome = ohpm_core::install::install(&client, &config, &prefix, &args.pkg, &opts).await?;

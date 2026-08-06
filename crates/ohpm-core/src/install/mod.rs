@@ -199,6 +199,65 @@ pub async fn uninstall(
     })
 }
 
+/// `OptionValid.js` — `validInstallOptions`/`validUnInstallOptions`/
+/// `validUpdateOptions`: the CLI option validation shared by install, update
+/// and uninstall (registry URL form, fetch_timeout / max_concurrent /
+/// retry_times / retry_interval ranges).
+pub fn valid_cli_options(command: &str, opts: &InstallOptions) -> Result<()> {
+    let invalid = |result: String| OhpmError::option_invalid(command, &result);
+    if let Some(registry) = &opts.registry {
+        let mut entries: Vec<&str> = registry.split(',').collect();
+        if entries.iter().any(|e| e.trim().is_empty()) {
+            entries = registry.split(',').collect();
+        }
+        for entry in &entries {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let ok = (entry.starts_with("http://") || entry.starts_with("https://"))
+                && url::Url::parse(entry).map(|u| u.host_str().is_some()).unwrap_or(false);
+            if !ok {
+                return Err(invalid(
+                    " - full url with \"http:// or \"https://\".".to_string(),
+                ));
+            }
+        }
+    }
+    if let Some(v) = opts.fetch_timeout {
+        if let Some(msg) = valid_range("fetch_timeout", v, 10_000, 360_000) {
+            return Err(invalid(msg));
+        }
+    }
+    if let Some(v) = opts.max_concurrent {
+        if let Some(msg) = valid_range("max_concurrent", v, 1, 200) {
+            return Err(invalid(msg));
+        }
+    }
+    if let Some(v) = opts.retry_times {
+        if let Some(msg) = valid_range("retry_times", v as u64, 0, 5) {
+            return Err(invalid(msg));
+        }
+    }
+    if let Some(v) = opts.retry_interval {
+        if let Some(msg) = valid_range("retry_interval", v, 1_000, 60_000) {
+            return Err(invalid(msg));
+        }
+    }
+    Ok(())
+}
+
+/// `validateNumberCommon` — the range message of `y()`.
+fn valid_range(key: &str, value: u64, min: u64, max: u64) -> Option<String> {
+    if value < min || value > max {
+        Some(format!(
+            " - invalid {key} value, reference value: [{min}, {max}]."
+        ))
+    } else {
+        None
+    }
+}
+
 /// The shared pipeline (`installModules` + the per-command wrapper steps).
 async fn run_pipeline(
     client: &RegistryClient,

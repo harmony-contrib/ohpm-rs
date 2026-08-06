@@ -33,6 +33,8 @@ pub async fn run(args: &UninstallArgs) -> Result<()> {
         retry_interval: args.retry_interval,
         ..Default::default()
     };
+    ohpm_core::install::valid_cli_options("uninstall", &opts)?;
+
 
     let client = RegistryClient::from_config(&config)?;
     let outcome =
