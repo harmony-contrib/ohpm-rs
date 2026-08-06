@@ -5,6 +5,7 @@
 //! 6.1.1.280 (`lib/...`). Module layout mirrors its core subsystems.
 
 pub mod archive;
+pub mod clean;
 pub mod config;
 pub mod constants;
 pub mod error;

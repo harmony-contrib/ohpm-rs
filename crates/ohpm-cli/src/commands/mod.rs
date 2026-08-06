@@ -1,6 +1,7 @@
 //! Command handlers: thin wrappers over `ohpm-core`.
 
 pub mod cache;
+pub mod clean;
 pub mod config;
 pub mod info;
 pub mod init;

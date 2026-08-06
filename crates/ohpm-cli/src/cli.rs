@@ -37,6 +37,10 @@ pub enum Command {
     Version(VersionArgs),
     /// Manage the ohpm cache folder.
     Cache(CacheArgs),
+    /// Delete all 'oh_modules' directories and the 'oh-package-lock.json5'
+    /// file in the current project.
+    #[command(alias = "cls")]
+    Clean(CleanArgs),
     /// Install packages from the registry or local sources.
     Install(InstallArgs),
     /// Update package(s) to their latest version based on the specified range.
@@ -242,6 +246,13 @@ pub struct CacheArgs {
     /// Subcommand: clean.
     #[arg(value_name = "action")]
     pub action: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CleanArgs {
+    /// Do not delete the 'oh-package-lock.json5' file.
+    #[arg(long = "keep-lockfile", alias = "kl")]
+    pub keep_lockfile: bool,
 }
 
 #[derive(Args, Debug, Clone)]
