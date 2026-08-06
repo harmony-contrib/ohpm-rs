@@ -13,6 +13,7 @@ passphrase interactively).
 ohpm-rs (OpenHarmony package manager), a Rust reimplementation of ohpm
 
 Commands:
+  install     Install package(s) from the registry or local sources
   publish     Publish a package to the registry
   prepublish  Pre-verify package content without publishing
   init        Create an oh-package.json5 file
@@ -33,8 +34,19 @@ A cargo workspace with two crates:
 
 - **`crates/ohpm-core`** — library: configuration (`.ohpmrc` + env overrides),
   package manifest/archive handling, integrity hashing (sha1 + sha512 in ssri
-  format), the registry client, RSA-signature login, and the publish
-  orchestrator. Fully unit- and integration-tested against a mock registry.
+  format), the registry client, RSA-signature login, the publish orchestrator,
+  and the install pipeline. Fully unit- and integration-tested against a mock
+  registry.
+- **`crates/ohpm-core/src/install/`** — the install subsystem (mirrors
+  `lib/core/install/`, architected like pnpm's Rust engine): dependency
+  resolution (`spec`/`semver`/`packument`/`resolver`), the
+  `oh-package-lock.json5` lockfile (`lockfile`), the dependency graph
+  (`graph`/`node`), the content-addressed store + extraction (`store`), the
+  `oh_modules` symlink phase (`symlink`), the `oh_modules/.ohpm/lock.json5`
+  install record (`lock_record`) and the pipeline orchestration (`root`/
+  `mod`). The lockfile, install record, `oh_modules` layout and manifest
+  rewrites are byte-compatible with the reference (verified against ohpm 6.0.1
+  on the public registry).
 - **`crates/ohpm-cli`** — the `ohpm-rs` binary: clap command definitions and thin
   command handlers.
 
@@ -45,7 +57,7 @@ installation (`config/`, `core/registry/`, `core/publish/`, `core/package/`).
 
 ```sh
 cargo build --workspace        # binary: target/debug/ohpm-rs
-cargo test  --workspace        # 62 tests: unit + mock-registry integration
+cargo test  --workspace        # 138 tests: unit + mock-registry integration
 ```
 
 ## Environment-variable authentication (CI)
@@ -265,5 +277,7 @@ via `file:`) but marks it non-publishable.
 - `oh-package.json5` is parsed as JSON5; unknown fields round-trip into the
   published metadata.
 - The `.tgz` (HSP) bundle path (`InterfaceHar` + `.hsp`) is implemented.
-- Out of scope for v1: `install`/`update`/dependency resolution, script hooks,
-  the `config encrypt` crypto component. The module layout leaves room for them.
+- Out of scope: `update`/`uninstall` (they reuse the install pipeline), script
+  hooks, conflict resolution (strict/overrides), unified lockfiles, HSP
+  packages, the `config encrypt` crypto component, and rayon-accelerated
+  extraction (the pipeline currently uses `spawn_blocking` + a semaphore).

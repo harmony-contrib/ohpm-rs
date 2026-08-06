@@ -37,6 +37,8 @@ pub enum Command {
     Version(VersionArgs),
     /// Manage the ohpm cache folder.
     Cache(CacheArgs),
+    /// Install packages from the registry or local sources.
+    Install(InstallArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -233,4 +235,52 @@ pub struct CacheArgs {
     /// Subcommand: clean.
     #[arg(value_name = "action")]
     pub action: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct InstallArgs {
+    /// Packages, folders, or har/tgz files:
+    /// [<@group>/]<pkg>[@<version> | @tag:<tag>] | <folder> | <har file>.
+    #[arg(value_name = "pkg")]
+    pub pkg: Vec<String>,
+    /// Save the package to devDependencies in oh-package.json5.
+    #[arg(long = "save-dev")]
+    pub save_dev: bool,
+    /// Save the package to dependencies in oh-package.json5.
+    #[arg(long = "save-prod")]
+    pub save_prod: bool,
+    /// Save the package to dynamicDependencies in oh-package.json5.
+    #[arg(long = "save-dynamic")]
+    pub save_dynamic: bool,
+    /// Do not save to oh-package.json5.
+    #[arg(long = "no-save")]
+    pub no_save: bool,
+    /// Do actual copy instead of symbolic link for source-code dependencies.
+    #[arg(long = "no-link")]
+    pub no_link: bool,
+    /// Install the dependencies of all modules in the project.
+    #[arg(long)]
+    pub all: bool,
+    /// Package root directory (defaults to the nearest directory upward that
+    /// contains oh-package.json5).
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Specify the registry.
+    #[arg(long)]
+    pub registry: Option<String>,
+    /// Network request timeout in milliseconds.
+    #[arg(long = "fetch_timeout")]
+    pub fetch_timeout: Option<u64>,
+    /// Whether to verify the TLS certificate.
+    #[arg(long = "strict_ssl")]
+    pub strict_ssl: Option<bool>,
+    /// Maximum concurrent tasks.
+    #[arg(long = "max_concurrent")]
+    pub max_concurrent: Option<u64>,
+    /// Number of retries for network requests.
+    #[arg(long = "retry_times")]
+    pub retry_times: Option<u32>,
+    /// Retry interval in milliseconds.
+    #[arg(long = "retry_interval")]
+    pub retry_interval: Option<u64>,
 }

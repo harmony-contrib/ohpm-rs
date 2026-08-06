@@ -22,10 +22,27 @@ pub const DEFAULT_REGISTRY_FILE: &str = ".default-registry";
 pub const MTIME_CACHE_DIR: &str = ".mtime";
 
 pub const MY_PACKAGE_JSON: &str = "oh-package.json5";
+pub const PACKAGE_JSON: &str = "package.json";
 pub const MY_MODULES: &str = "oh_modules";
+pub const NODE_MODULES: &str = "node_modules";
 pub const TMP_DIR_NAME: &str = ".tmp";
 pub const LOCK_JSON: &str = "oh-package-lock.json5";
 pub const BUILD_PROFILE: &str = "build-profile.json5";
+pub const SIGN_FOLDER_NAME: &str = ".CodeSignature";
+pub const HSP_DIR: &str = ".hsp";
+
+/// The "tag:" prefix for tag specs (`tag:<name>`).
+pub const TAG_PREFIX: &str = "tag:";
+
+/// Path/content compression for store-dir names (see `Constants.compressConfig`).
+pub mod compress {
+    pub const PATH_LEN: usize = 44;
+    pub const PKG_HEAD: &str = "file:";
+    pub const ALGORITHM: &str = "sha256";
+    pub const ENCODING: &str = "base64";
+    pub const REPLACE_TARGET: &str = "+";
+    pub const TO_UPPER_CASE: bool = false;
+}
 
 /// File suffixes.
 pub const TGZ_SUFFIX: &str = ".tgz";

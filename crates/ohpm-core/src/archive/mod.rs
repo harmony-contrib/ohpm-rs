@@ -92,6 +92,67 @@ pub fn extract(path: &Path, dest: &Path, strip: u32, file_list: Option<&[String]
     Ok(())
 }
 
+/// The reference's tar-entry path-traversal pattern
+/// (`/(\/\.\.\/)|(\.\.\/)|(\/\.\.)|(\.\.$)/gi`).
+fn is_traversal_entry(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("/../")
+        || lower.contains("../")
+        || lower.contains("/..")
+        || lower.ends_with("..")
+}
+
+/// Extract entries from an archive into `dest`, skipping any entry under
+/// `ignore_dir` and rejecting `..` path traversal (mirrors
+/// `FsUtil.extractAndIgnoreTargetFolder` + the `DepInstall` traversal check).
+///
+/// * `strip` — number of leading path components to drop (e.g. `package/`).
+pub fn extract_ignore_dir(path: &Path, dest: &Path, strip: u32, ignore_dir: &str) -> Result<()> {
+    std::fs::create_dir_all(dest)?;
+    let mut ar = open_reader(path)?;
+    for entry in ar.entries()? {
+        let mut entry = entry?;
+        // Use the raw (unvalidated) path — the reference's tar_rs lists
+        // entries with `..` and rejects them explicitly.
+        let raw_path = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
+        // `.CodeSignature` folders are never extracted, at any depth.
+        if raw_path.split('/').any(|c| c == ignore_dir) {
+            continue;
+        }
+        if is_traversal_entry(&raw_path) {
+            return Err(OhpmError::new(
+                "DepInstallDirectoryTraversal",
+                format!("{raw_path},cannot contain special characters .. or ../"),
+            ));
+        }
+        let rel = strip_components(&raw_path, strip);
+        if rel.is_empty() {
+            continue;
+        }
+        let out_path = dest.join(rel);
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&out_path)?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if entry.header().entry_type().is_symlink() {
+            let target = entry.header().link_name()?.unwrap_or_default();
+            let _ = std::fs::remove_file(&out_path);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&target, &out_path)?;
+            #[cfg(not(unix))]
+            std::fs::write(&out_path, b"")?;
+            continue;
+        }
+        let mut f = File::create(&out_path)?;
+        std::io::copy(&mut entry, &mut f)?;
+        f.flush()?;
+    }
+    Ok(())
+}
+
 fn strip_components(path: &str, strip: u32) -> String {
     if strip == 0 {
         return path.to_string();
@@ -242,7 +303,7 @@ mod tests {
     fn find_manifest_prefers_root_over_nested_stub() {
         // A har with a root manifest plus a nested NAPI type-stub package.
         let (dir, har) = build_har_with_manifest("com.example.a", "1.0.0");
-        let mut add = |rel: &str, content: &str| {
+        let add = |rel: &str, content: &str| {
             let src = dir.path().join("src");
             std::fs::create_dir_all(src.join(rel).parent().unwrap()).unwrap();
             std::fs::write(src.join(rel), content).unwrap();

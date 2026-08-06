@@ -11,11 +11,14 @@ repository = "https://github.com/harmony-contrib/ohpm-rs"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: the reference rewrites manifests/lockfiles with
+# insertion-ordered maps (`JSON.stringify` of parsed JSON5 objects).
+serde_json = { version = "1", features = ["preserve_order"] }
 json5 = "0.4"
 thiserror = "2"
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "sync"] }
+node-semver = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream", "http2"] }
 tar = "0.4"
 flate2 = "1"

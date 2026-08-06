@@ -35,5 +35,6 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Root => commands::root::run().await,
         Command::Version(args) => commands::version::run(&args).await,
         Command::Cache(args) => commands::cache::run(args.action).await,
+        Command::Install(args) => commands::install::run(&args).await,
     }
 }

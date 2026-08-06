@@ -25,6 +25,7 @@ pub const SOURCE_ORDER: [&str; 6] = ["cli", "env", "cwd", "project", "user", "de
 /// One `config list` section: `(source, label, entries)`.
 pub type ConfigSection = (&'static str, String, Vec<(String, ConfigValue)>);
 
+#[derive(Clone)]
 pub struct Config {
     /// source name -> (key -> value)
     data: BTreeMap<String, BTreeMap<String, ConfigValue>>,
