@@ -36,6 +36,9 @@ pub struct DependencyGraph {
     resolve_failed: Arc<std::sync::Mutex<BTreeSet<String>>>,
     /// The flattened node list (`finalDepList`, roots included).
     flat: Vec<Arc<Node>>,
+    /// `Installed`-mode faults — `(message, depth)` of the unmet nodes
+    /// (`list` keeps them instead of erroring).
+    pub faults: Vec<(String, i32)>,
 }
 
 impl DependencyGraph {
@@ -56,6 +59,7 @@ impl DependencyGraph {
             strict_mode,
             resolve_failed,
             flat: Vec::new(),
+            faults: Vec::new(),
         }
     }
 
@@ -219,6 +223,50 @@ pub async fn build_graphs(
     retry_interval_ms: u64,
     project: Option<&crate::install::modules::ProjectBuildProfile>,
 ) -> Result<DependencyGraph> {
+    build_graphs_mode(
+        resolver,
+        roots,
+        max_concurrent,
+        retry_times,
+        retry_interval_ms,
+        project,
+        false,
+    )
+    .await
+}
+
+/// `build_graphs` with the `Installed` builder type — unmet nodes are kept
+/// (their faults recorded) instead of aborting the build, like the reference's
+/// `ohpm list` graph.
+pub async fn build_graphs_installed(
+    resolver: &Arc<Resolver>,
+    roots: Vec<(PathBuf, Arc<Node>)>,
+    max_concurrent: usize,
+    retry_times: u32,
+    retry_interval_ms: u64,
+    project: Option<&crate::install::modules::ProjectBuildProfile>,
+) -> Result<DependencyGraph> {
+    build_graphs_mode(
+        resolver,
+        roots,
+        max_concurrent,
+        retry_times,
+        retry_interval_ms,
+        project,
+        true,
+    )
+    .await
+}
+
+async fn build_graphs_mode(
+    resolver: &Arc<Resolver>,
+    roots: Vec<(PathBuf, Arc<Node>)>,
+    max_concurrent: usize,
+    retry_times: u32,
+    retry_interval_ms: u64,
+    project: Option<&crate::install::modules::ProjectBuildProfile>,
+    installed: bool,
+) -> Result<DependencyGraph> {
     let project_root = resolver.project_root.clone();
     let graph = Arc::new(Mutex::new(DependencyGraph::new(
         project_root,
@@ -250,6 +298,7 @@ pub async fn build_graphs(
         }
     }
 
+    let faults: Arc<Mutex<Vec<(String, i32)>>> = Arc::new(Mutex::new(Vec::new()));
     let mut workers = tokio::task::JoinSet::new();
     for _ in 0..max_concurrent.max(1) {
         let graph = graph.clone();
@@ -258,6 +307,7 @@ pub async fn build_graphs(
         let first_error = first_error.clone();
         let resolver = Arc::clone(resolver);
         let project = project.cloned();
+        let faults = faults.clone();
         workers.spawn(async move {
             loop {
                 if error_flag.load(Ordering::SeqCst) {
@@ -265,7 +315,7 @@ pub async fn build_graphs(
                 }
                 let task = queue.lock().await.pop_front();
                 let Some(task) = task else { return };
-                if let Err(e) = run_task(&graph, &resolver, &queue, task, retry_times, retry_interval_ms, project.as_ref()).await {
+                if let Err(e) = run_task(&graph, &resolver, &queue, task, retry_times, retry_interval_ms, project.as_ref(), installed, &faults).await {
                     error_flag.store(true, Ordering::SeqCst);
                     let mut guard = first_error.lock().await;
                     if guard.is_none() {
@@ -285,6 +335,7 @@ pub async fn build_graphs(
         return Err(e);
     }
     let mut g = graph.lock().await;
+    g.faults = faults.lock().await.clone();
     if resolver.resolve_conflict {
         // Cross-module conflicts: rebind each name to the global
         // max-satisfying node (the reference's rebuild yields the same data).
@@ -324,6 +375,8 @@ async fn run_task(
     retry_times: u32,
     retry_interval_ms: u64,
     project: Option<&crate::install::modules::ProjectBuildProfile>,
+    installed: bool,
+    faults: &Arc<Mutex<Vec<(String, i32)>>>,
 ) -> Result<()> {
     let where_dir = {
         let g = graph.lock().await;
@@ -373,7 +426,7 @@ async fn run_task(
         project,
         node_data.masked_by_override_dependency_map,
     )?;
-    dfs(graph, queue, &task, Arc::new(node), task.cur_depth + 1).await
+    dfs(graph, queue, &task, Arc::new(node), task.cur_depth + 1, installed, faults).await
 }
 
 /// The `dfs` continuation: invalid-dependency check, unmet rethrow, depth
@@ -384,6 +437,8 @@ async fn dfs(
     task: &Task,
     child: Arc<Node>,
     depth: usize,
+    installed: bool,
+    faults: &Arc<Mutex<Vec<(String, i32)>>>,
 ) -> Result<()> {
     if !child.data.is_root && task.root_node.data.name == child.data.name {
         return Err(OhpmError::dep_builder_invalid_dependency(
@@ -394,6 +449,23 @@ async fn dfs(
         ));
     }
     if child.data.unmet.is_some() {
+        if installed {
+            // `handleFaultyNode` — the unmet node is kept with its fault; the
+            // recorded depth is `cur_depth - 1` (the reference's callback).
+            let message = format!(
+                "missing: {}@{}, required by {}",
+                child.data.name, child.data.fetch_spec, task.cur_node.node_key()
+            );
+            faults
+                .lock()
+                .await
+                .push((message, task.cur_depth.saturating_sub(1) as i32));
+            let mut g = graph.lock().await;
+            if g.find_node(&child.data.name, &child.data.fetch_spec).is_none() {
+                g.register_node(child.clone())?;
+            }
+            return Ok(());
+        }
         return Err(child
             .data
             .unmet

@@ -198,6 +198,9 @@ pub struct InfoArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct ListArgs {
+    /// Package name, optionally with @version.
+    #[arg(value_name = "pkg")]
+    pub pkg: Option<String>,
     /// Specify the max depth of the dependency graph.
     #[arg(short = 'd', long)]
     pub depth: Option<u32>,

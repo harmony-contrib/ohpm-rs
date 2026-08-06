@@ -13,6 +13,7 @@ pub mod graph;
 pub mod hooks;
 pub mod lock_record;
 pub mod version_conflict;
+pub mod list;
 pub mod lockfile;
 pub mod mtime;
 pub mod modules;
