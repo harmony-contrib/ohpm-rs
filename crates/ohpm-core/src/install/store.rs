@@ -227,6 +227,90 @@ pub async fn get_pkg_cache_path(ctx: &StoreContext, node: &Node) -> Result<PathB
     Ok(path)
 }
 
+/// `getPkgCachePath` for the `.hsp` file of a bundle-app HSP package — the
+/// `resolved_hsp` tarball is fetched into the content cache (verified with
+/// `integrity_hsp`) and returned as the file to copy into `oh_modules/.hsp`.
+/// `None` when the package carries no `.hsp` URL.
+pub async fn get_hsp_cache_path(ctx: &StoreContext, node: &Node) -> Result<Option<PathBuf>> {
+    let Some(resolved_hsp) = node.data.resolved_hsp.clone() else {
+        return Ok(None);
+    };
+    let (algo, digest) = match &node.data.integrity_hsp {
+        Some(integrity) => parse_ssri(integrity)?,
+        None => {
+            let shasum = node
+                .data
+                .shasum
+                .clone()
+                .ok_or_else(|| OhpmError::cache_invalid_package(&node.data.name, &node.data.pinned_spec))?;
+            ("sha1".to_string(), shasum)
+        }
+    };
+    let path = cache_file_path(&ctx.cache_dir(), &digest);
+    if path.exists() {
+        let bytes = std::fs::read(&path)?;
+        if hex_digest(&algo, &bytes) == digest {
+            return Ok(Some(path));
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let token = read_token_for_url(&ctx.config, &resolved_hsp);
+    let timeout = ctx.config.get_number(types::FETCH_TIMEOUT) as u64;
+    let bytes = {
+        let cell = ctx
+            .downloads
+            .lock()
+            .await
+            .entry(resolved_hsp.clone())
+            .or_default()
+            .clone();
+        cell.run(async {
+            let response =
+                get_with_redirect(&ctx.client, &ctx.config, &resolved_hsp, &token, timeout).await?;
+            if !response.status().is_success() {
+                return Err(OhpmError::response_status(
+                    response.status().as_u16(),
+                    "",
+                ));
+            }
+            Ok(Arc::new(response.bytes().await.map_err(OhpmError::from)?.to_vec()))
+        })
+        .await?
+    };
+    if hex_digest(&algo, &bytes) != digest {
+        return Err(OhpmError::cache_invalid_package(&node.data.name, &node.data.pinned_spec));
+    }
+    let tmp = path.parent().unwrap().join(format!(
+        "{}+{}@{}",
+        node.data.name.replace('/', "+"),
+        node.data.pinned_spec,
+        std::process::id()
+    ));
+    std::fs::write(&tmp, &bytes[..])?;
+    rename_if_not_exist(&tmp, &path)?;
+    Ok(Some(path))
+}
+
+/// The `.hsp` placement shared by the registry and local installers: copy the
+/// `.hsp` file + the package manifest into `oh_modules/.hsp/<storeDir>`.
+fn place_hsp_file(ctx: &StoreContext, node: &Node, hsp_bytes: &[u8]) -> Result<()> {
+    let hsp_dir = node.data.resolve_hsp_store_dir(&ctx.project_root);
+    std::fs::create_dir_all(&hsp_dir)?;
+    let hsp_path = hsp_dir.join(&node.data.hsp_name);
+    std::fs::write(&hsp_path, hsp_bytes)?;
+    // The manifest alongside, like the reference.
+    let manifest = node
+        .data
+        .resolve_pkg_store_dir(&ctx.project_root)
+        .join(crate::constants::MY_PACKAGE_JSON);
+    if manifest.is_file() {
+        std::fs::copy(&manifest, hsp_dir.join(crate::constants::MY_PACKAGE_JSON))?;
+    }
+    Ok(())
+}
+
 /// The reference's `getAvailableAuthByUrl` — a config key `//host/path/:_read_auth`
 /// applies when the URL starts with `//host/path/`.
 fn read_token_for_url(config: &Config, url: &str) -> String {
@@ -284,10 +368,42 @@ async fn install_registry_node(ctx: &StoreContext, node: &Node) -> Result<()> {
         &sem,
     )
     .await;
-    result.map_err(|e| handle_install_exception(node, &e))
+    result.map_err(|e| handle_install_exception(node, &e))?;
+    // `installRegistryArtifactDep` — the bundle-app HSP `.hsp` file.
+    if node.data.hsp_type.as_deref() == Some(crate::constants::HSP_TYPE_BUNDLE_APP) {
+        install_hsp_file(ctx, node).await?;
+    }
+    Ok(())
 }
 
-/// `installLocalArtifact` — extract a local .har/.tgz into the store.
+/// The `.hsp` file placement: the cached `resolved_hsp` tarball is copied into
+/// `oh_modules/.hsp/<storeDir>` (dev deps skip the copy, like the reference).
+async fn install_hsp_file(ctx: &StoreContext, node: &Node) -> Result<()> {
+    let hsp_cache = get_hsp_cache_path(ctx, node).await?;
+    // `NotFoundHspFileByRegistryTgz` — a bundle-app HSP without its `.hsp`
+    // file cannot be installed as a runtime dependency.
+    let Some(hsp_cache) = hsp_cache else {
+        if node.dep_type != crate::install::node::DepType::Dev {
+            return Err(OhpmError::not_found_hsp_file_by_registry_tgz(
+                &node.data.name,
+                &node.data.pinned_spec,
+            ));
+        }
+        return Ok(());
+    };
+    if node.data.is_debug_hsp {
+        log::warn!(
+            "The installed HSP package \"{}@{}\" was compiled in debugging mode which may cause asset leakage.",
+            node.data.name,
+            node.data.pinned_spec
+        );
+    }
+    let bytes = std::fs::read(&hsp_cache)?;
+    place_hsp_file(ctx, node, &bytes)
+}
+
+/// `installLocalArtifact` — extract a local .har/.tgz into the store; a
+/// bundle-app HSP tgz also places its embedded `.hsp` file.
 async fn install_local_artifact_node(ctx: &StoreContext, node: &Node) -> Result<()> {
     let path = PathBuf::from(&node.data.pinned_spec);
     let bytes = std::fs::read(&path).map_err(|_| {
@@ -296,7 +412,25 @@ async fn install_local_artifact_node(ctx: &StoreContext, node: &Node) -> Result<
     let store_dir = node.data.resolve_pkg_store_dir(&ctx.project_root);
     let sem = Arc::new(Semaphore::new(ctx.max_concurrent));
     let result = extract_to_store(&path, &store_dir, bytes.len() as u64, &sem).await;
-    result.map_err(|e| handle_install_exception(node, &e))
+    result.map_err(|e| handle_install_exception(node, &e))?;
+    // `installLocalArtifact` — the bundle-app HSP `.hsp` entry of the tgz.
+    if node.data.hsp_type.as_deref() == Some(crate::constants::HSP_TYPE_BUNDLE_APP)
+        && node.dep_type != crate::install::node::DepType::Dev
+    {
+        if let Some((_, hsp_entry)) = crate::archive::hsp_detect(&path).ok().flatten() {
+            if let Ok(hsp_bytes) = crate::archive::read_entry_content(&path, &hsp_entry) {
+                if node.data.is_debug_hsp {
+                    log::warn!(
+                        "The installed HSP package \"{}@{}\" was compiled in debugging mode which may cause asset leakage.",
+                        node.data.name,
+                        node.data.pinned_spec
+                    );
+                }
+                place_hsp_file(ctx, node, &hsp_bytes)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The shared extract path: size check, tmp dir, extract with `.CodeSignature`
@@ -521,6 +655,12 @@ mod tests {
             unmet: None,
             masked_by_override_dependency_map: false,
             masked_deps: None,
+            hsp_store_dir: String::new(),
+            hsp_name: String::new(),
+            hsp_type: None,
+            is_debug_hsp: false,
+            resolved_hsp: None,
+            integrity_hsp: None,
         }
     }
 

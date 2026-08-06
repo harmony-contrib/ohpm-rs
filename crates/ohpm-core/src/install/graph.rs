@@ -459,6 +459,12 @@ mod tests {
             unmet: None,
             masked_by_override_dependency_map: false,
             masked_deps: None,
+            hsp_store_dir: String::new(),
+            hsp_name: String::new(),
+            hsp_type: None,
+            is_debug_hsp: false,
+            resolved_hsp: None,
+            integrity_hsp: None,
         })
     }
 

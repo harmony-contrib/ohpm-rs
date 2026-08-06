@@ -74,6 +74,8 @@ fn init_test_logger() {
 #[derive(Clone)]
 struct MockVersion {
     tarball: Bytes,
+    hsp: Option<Bytes>,
+    hsp_type: Option<&'static str>,
     deps: BTreeMap<String, String>,
     dev_deps: BTreeMap<String, String>,
 }
@@ -185,6 +187,12 @@ fn packument_response(
             "tarball": tarball_url,
             "shasum": sha1_hex(&mv.tarball),
         });
+        if let Some(hsp) = &mv.hsp {
+            let hsp_url = format!("{base}/-/{}-{version}.hsp", name.replace('/', "-"));
+            dist["resolved_hsp"] = serde_json::Value::String(hsp_url);
+            dist["integrity_hsp"] =
+                serde_json::Value::String(format!("sha512-{}", sha512_b64(hsp)));
+        }
         if !registry.corrupt_tarballs {
             dist["integrity"] = serde_json::Value::String(format!("sha512-{}", sha512_b64(&mv.tarball)));
         } else {
@@ -196,6 +204,10 @@ fn packument_response(
             "_ohpmVersion": "1",
             "dist": dist,
         });
+        if let Some(hsp_type) = mv.hsp_type {
+            entry["packageType"] = serde_json::Value::String("InterfaceHar".into());
+            entry["hspType"] = serde_json::Value::String(hsp_type.into());
+        }
         if !mv.deps.is_empty() {
             entry["dependencies"] = serde_json::to_value(&mv.deps).unwrap();
         }
@@ -223,13 +235,18 @@ fn tarball_response(
     let Some(pkg) = registry.packages.get(name) else {
         return (StatusCode::NOT_FOUND, "not found".to_string()).into_response();
     };
-    // `foo-1.2.3.har` -> version `1.2.3`
+    // `foo-1.2.3.har` / `foo-1.2.3.hsp` -> version `1.2.3`
     let version = file
         .strip_suffix(".har")
+        .or_else(|| file.strip_suffix(".hsp"))
         .and_then(|f| f.strip_prefix(&format!("{}-", name.replace('/', "-"))))
         .unwrap_or_default()
         .to_string();
     match pkg.versions.get(&version) {
+        Some(mv) if file.ends_with(".hsp") => match &mv.hsp {
+            Some(hsp) => hsp.clone().into_response(),
+            None => (StatusCode::NOT_FOUND, "not found".to_string()).into_response(),
+        },
         Some(mv) => mv.tarball.clone().into_response(),
         None => (StatusCode::NOT_FOUND, "not found".to_string()).into_response(),
     }
@@ -271,8 +288,8 @@ fn sample_registry(work: &Path) -> (MockRegistry, BTreeMap<String, Bytes>) {
         "@ohos/bar".to_string(),
         MockPackage {
             versions: BTreeMap::from([
-                ("1.0.0".to_string(), MockVersion { tarball: bar_100, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
-                ("2.0.0".to_string(), MockVersion { tarball: bar_200, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
+                ("1.0.0".to_string(), MockVersion { tarball: bar_100, hsp: None, hsp_type: None, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
+                ("2.0.0".to_string(), MockVersion { tarball: bar_200, hsp: None, hsp_type: None, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
             ]),
             dist_tags: BTreeMap::from([("latest".to_string(), "2.0.0".to_string())]),
         },
@@ -287,7 +304,7 @@ fn sample_registry(work: &Path) -> (MockRegistry, BTreeMap<String, Bytes>) {
         MockPackage {
             versions: BTreeMap::from([(
                 "1.2.3".to_string(),
-                MockVersion { tarball: foo_123, deps: foo_deps, dev_deps: BTreeMap::new() },
+                MockVersion { tarball: foo_123, hsp: None, hsp_type: None, deps: foo_deps, dev_deps: BTreeMap::new() },
             )]),
             dist_tags: BTreeMap::from([("latest".to_string(), "1.2.3".to_string())]),
         },
@@ -300,7 +317,7 @@ fn sample_registry(work: &Path) -> (MockRegistry, BTreeMap<String, Bytes>) {
         MockPackage {
             versions: BTreeMap::from([(
                 "1.0.0".to_string(),
-                MockVersion { tarball: unittest_100, deps: BTreeMap::new(), dev_deps: BTreeMap::new() },
+                MockVersion { tarball: unittest_100, hsp: None, hsp_type: None, deps: BTreeMap::new(), dev_deps: BTreeMap::new() },
             )]),
             dist_tags: BTreeMap::from([("latest".to_string(), "1.0.0".to_string())]),
         },
@@ -575,6 +592,8 @@ async fn update_moves_to_new_version() {
             "1.3.0".to_string(),
             MockVersion {
                 tarball: new_har,
+                hsp: None,
+                hsp_type: None,
                 deps: BTreeMap::new(),
                 dev_deps: BTreeMap::new(),
             },
@@ -786,8 +805,8 @@ async fn version_conflict_resolves_to_max() {
         "@ohos/bar".to_string(),
         MockPackage {
             versions: BTreeMap::from([
-                ("1.0.0".to_string(), MockVersion { tarball: bar_100, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
-                ("2.0.0".to_string(), MockVersion { tarball: bar_200, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
+                ("1.0.0".to_string(), MockVersion { tarball: bar_100, hsp: None, hsp_type: None, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
+                ("2.0.0".to_string(), MockVersion { tarball: bar_200, hsp: None, hsp_type: None, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
             ]),
             dist_tags: BTreeMap::from([("latest".to_string(), "2.0.0".to_string())]),
         },
@@ -798,7 +817,7 @@ async fn version_conflict_resolves_to_max() {
     registry.packages.insert(
         "@ohos/foo".to_string(),
         MockPackage {
-            versions: BTreeMap::from([("1.2.3".to_string(), MockVersion { tarball: foo_123, deps: foo_deps, dev_deps: BTreeMap::new() })]),
+            versions: BTreeMap::from([("1.2.3".to_string(), MockVersion { tarball: foo_123, hsp: None, hsp_type: None, deps: foo_deps, dev_deps: BTreeMap::new() })]),
             dist_tags: BTreeMap::from([("latest".to_string(), "1.2.3".to_string())]),
         },
     );
@@ -808,7 +827,7 @@ async fn version_conflict_resolves_to_max() {
     registry.packages.insert(
         "conflictee".to_string(),
         MockPackage {
-            versions: BTreeMap::from([("1.0.0".to_string(), MockVersion { tarball: conflict_100, deps: conflict_deps, dev_deps: BTreeMap::new() })]),
+            versions: BTreeMap::from([("1.0.0".to_string(), MockVersion { tarball: conflict_100, hsp: None, hsp_type: None, deps: conflict_deps, dev_deps: BTreeMap::new() })]),
             dist_tags: BTreeMap::from([("latest".to_string(), "1.0.0".to_string())]),
         },
     );
@@ -1063,4 +1082,89 @@ async fn unified_lockfile_merges_modules() {
     let entry_pkg = &record["packages"]["entry@file:entry"];
     assert!(entry_pkg.is_object(), "depended module root recorded: {:?}", record["packages"]);
     assert_eq!(entry_pkg["storePath"], "entry");
+}
+
+#[tokio::test]
+async fn hsp_bundle_app_places_hsp_file() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+
+    // A bundle-app HSP package: the registry serves the main tarball and a
+    // separate .hsp file (dist.resolved_hsp / integrity_hsp).
+    let mut registry = MockRegistry::default();
+    let hsp_bytes: Bytes = Bytes::from_static(b"fake-hsp-content");
+    let main_har = build_har(work.path(), "myhsp", "1.0.0", &BTreeMap::new());
+    registry.packages.insert(
+        "myhsp".to_string(),
+        MockPackage {
+            versions: BTreeMap::from([(
+                "1.0.0".to_string(),
+                MockVersion {
+                    tarball: main_har,
+                    hsp: Some(hsp_bytes),
+                    hsp_type: Some("bundle_app"),
+                    deps: BTreeMap::new(),
+                    dev_deps: BTreeMap::new(),
+                },
+            )]),
+            dist_tags: BTreeMap::from([("latest".to_string(), "1.0.0".to_string())]),
+        },
+    );
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
+
+    let prefix = work.path().join("entry");
+    write_manifest(&prefix, "{ \"myhsp\": \"^1.0.0\" }", "{}");
+    let cfg = load_config(home.path(), &addr, cache.path());
+
+    let outcome = run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    assert_eq!(outcome.installed, 1);
+
+    // The .hsp file lands in oh_modules/.hsp/<storeDir>/myhsp.hsp next to the
+    // package manifest.
+    let hsp_dir = prefix.join("oh_modules/.hsp/myhsp@1.0.0");
+    let hsp_file = hsp_dir.join("myhsp.hsp");
+    assert_eq!(std::fs::read(&hsp_file).unwrap(), b"fake-hsp-content");
+    assert!(hsp_dir.join("oh-package.json5").is_file());
+
+    // The install record carries storePathHsp.
+    let record: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh_modules/.ohpm/lock.json5")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        record["packages"]["myhsp@1.0.0"]["storePathHsp"],
+        "oh_modules/.hsp/myhsp@1.0.0"
+    );
+
+    // A bundle-app HSP without a .hsp file fails for runtime deps.
+    let mut registry = MockRegistry::default();
+    let no_hsp_har = build_har(work.path(), "nohsp", "1.0.0", &BTreeMap::new());
+    registry.packages.insert(
+        "nohsp".to_string(),
+        MockPackage {
+            versions: BTreeMap::from([(
+                "1.0.0".to_string(),
+                MockVersion {
+                    tarball: no_hsp_har,
+                    hsp: None,
+                    hsp_type: Some("bundle_app"),
+                    deps: BTreeMap::new(),
+                    dev_deps: BTreeMap::new(),
+                },
+            )]),
+            dist_tags: BTreeMap::from([("latest".to_string(), "1.0.0".to_string())]),
+        },
+    );
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
+    let prefix2 = work.path().join("entry2");
+    write_manifest(&prefix2, "{ \"nohsp\": \"^1.0.0\" }", "{}");
+    let cfg = load_config(home.path(), &addr, cache.path());
+    let err = run_install(&cfg, &prefix2, &[], &InstallOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "NotFoundHspFileByRegistryTgz");
 }

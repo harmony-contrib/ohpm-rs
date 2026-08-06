@@ -272,10 +272,12 @@ fn gen_package(node: &Node, graph: &DependencyGraph, project_root: &Path) -> Pac
     } else {
         node.data.resolve_save_root(project_root)
     };
+    let hsp_store = node.data.resolve_hsp_store_dir(project_root);
     PackageEntry {
         integrity: node.data.integrity.clone(),
         store_path: relative_slash(project_root, &save_root),
-        store_path_hsp: None,
+        store_path_hsp: (!node.data.hsp_store_dir.is_empty())
+            .then(|| relative_slash(project_root, &hsp_store)),
         dependencies: actual_dependency(node, graph, DepType::Prod, project_root),
         dev_dependencies: actual_dependency(node, graph, DepType::Dev, project_root),
         dynamic_dependencies: actual_dependency(node, graph, DepType::Dynamic, project_root),

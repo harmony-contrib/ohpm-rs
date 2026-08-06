@@ -636,6 +636,12 @@ impl Resolver {
                 unmet: Some(e),
                 masked_by_override_dependency_map: false,
                 masked_deps: None,
+            hsp_store_dir: String::new(),
+                hsp_name: String::new(),
+                hsp_type: None,
+                is_debug_hsp: false,
+                resolved_hsp: None,
+                integrity_hsp: None,
             })),
         }
     }
@@ -1062,15 +1068,38 @@ impl Resolver {
         if manifest.name.is_empty() {
             return Err(OhpmError::install_field_is_empty("name"));
         }
+        // `LocalArtifactMetadataFetcherImpl` — `hspDetect` + the hspType
+        // decision: a bundle-app HSP tgz carries a `.hsp` entry, otherwise
+        // `cross_app`; `isDebugHsp` reads the manifest `metadata.debug`.
+        let detected = crate::archive::hsp_detect(&path).ok().flatten();
+        let package_type = manifest.package_type.clone();
+        let hsp_type = if package_type.as_deref() == Some(crate::constants::HSP_PACKAGE_TYPE) {
+            if detected.is_some() {
+                Some(crate::constants::HSP_TYPE_BUNDLE_APP.to_string())
+            } else {
+                Some(crate::constants::HSP_TYPE_CROSS_APP.to_string())
+            }
+        } else {
+            None
+        };
+        let is_debug_hsp = hsp_type.as_deref() == Some(crate::constants::HSP_TYPE_BUNDLE_APP)
+            && manifest
+                .extra
+                .get("metadata")
+                .and_then(|m| m.get("debug"))
+                .and_then(|d| d.as_bool())
+                .unwrap_or(false);
         // The local metadata carries `resolved` as a plain field (no `dist`).
         let meta = VersionMeta {
             name: manifest.name.clone(),
             version: manifest.version.clone(),
-            package_type: manifest.package_type.clone(),
+            package_type,
             dependencies: manifest.dependencies.clone(),
             dev_dependencies: manifest.dev_dependencies.clone(),
             dynamic_dependencies: manifest.dynamic_dependencies.clone(),
             resolved: parsed.fetch_spec.clone(),
+            hsp_type,
+            is_debug_hsp: Some(is_debug_hsp),
             ..Default::default()
         };
         let mut versions = BTreeMap::new();
@@ -1238,6 +1267,13 @@ impl Resolver {
         } else {
             lock_pkg.version.clone()
         };
+        // `ArtifactDepBuilderImpl` — the HSP store fields.
+        let (hsp_store_dir, hsp_name) = crate::install::node::hsp_fields(
+            &node_name,
+            lock_pkg.package_type.as_deref(),
+            lock_pkg.hsp_type.as_deref(),
+            &save_root_dir,
+        );
         Ok(Arc::new(NodeData {
             name: node_name,
             declared_name: original.name.clone(),
@@ -1266,6 +1302,12 @@ impl Resolver {
             unmet: None,
             masked_by_override_dependency_map: false,
             masked_deps: None,
+            hsp_store_dir,
+            hsp_name,
+            hsp_type: lock_pkg.hsp_type.clone(),
+            is_debug_hsp: lock_pkg.is_debug_hsp.unwrap_or(false),
+            resolved_hsp: lock_pkg.resolved_hsp.clone(),
+            integrity_hsp: lock_pkg.integrity_hsp.clone(),
         }))
     }
 
@@ -1401,6 +1443,10 @@ impl LockPkg {
                 dev_dependencies: meta.dev_dependencies.clone(),
                 dynamic_dependencies: meta.dynamic_dependencies.clone(),
                 package_type: meta.package_type.clone(),
+                hsp_type: meta.hsp_type.clone(),
+                is_debug_hsp: meta.is_debug_hsp,
+                resolved_hsp: meta.dist.as_ref().and_then(|d| d.resolved_hsp.clone()),
+                integrity_hsp: meta.dist.as_ref().and_then(|d| d.integrity_hsp.clone()),
                 ..Default::default()
             },
             // No `dist` (local artifacts): the metadata is used as-is; the
@@ -1416,6 +1462,10 @@ impl LockPkg {
                 dev_dependencies: meta.dev_dependencies.clone(),
                 dynamic_dependencies: meta.dynamic_dependencies.clone(),
                 package_type: meta.package_type.clone(),
+                hsp_type: meta.hsp_type.clone(),
+                is_debug_hsp: meta.is_debug_hsp,
+                resolved_hsp: meta.dist.as_ref().and_then(|d| d.resolved_hsp.clone()),
+                integrity_hsp: meta.dist.as_ref().and_then(|d| d.integrity_hsp.clone()),
                 ..Default::default()
             },
         }
@@ -1440,6 +1490,10 @@ impl LockPkg {
             masked_by_override_dependency_map: node
                 .masked_by_override_dependency_map
                 .then_some(true),
+            hsp_type: node.hsp_type.clone(),
+            is_debug_hsp: node.is_debug_hsp.then_some(true),
+            resolved_hsp: node.resolved_hsp.clone(),
+            integrity_hsp: node.integrity_hsp.clone(),
             ..Default::default()
         }
     }
@@ -1459,6 +1513,20 @@ impl VersionMeta {
             resolved: lock_pkg.resolved.clone(),
             integrity: lock_pkg.integrity.clone(),
             shasum: lock_pkg.shasum.clone(),
+            hsp_type: lock_pkg.hsp_type.clone(),
+            is_debug_hsp: lock_pkg.is_debug_hsp,
+            // Only the lockfile-derived `.hsp` fields travel via `dist`
+            // (the tarball stays in `resolved`).
+            dist: if lock_pkg.resolved_hsp.is_some() {
+                Some(Dist {
+                    tarball: lock_pkg.resolved.clone(),
+                    resolved_hsp: lock_pkg.resolved_hsp.clone(),
+                    integrity_hsp: lock_pkg.integrity_hsp.clone(),
+                    ..Default::default()
+                })
+            } else {
+                None
+            },
             ..Default::default()
         }
     }
@@ -1590,6 +1658,12 @@ mod tests {
             unmet: None,
             masked_by_override_dependency_map: false,
             masked_deps: None,
+            hsp_store_dir: String::new(),
+            hsp_name: String::new(),
+            hsp_type: None,
+            is_debug_hsp: false,
+            resolved_hsp: None,
+            integrity_hsp: None,
         };
         node.dependencies.insert("bar".to_string(), "1.0.0".to_string());
         let lp = LockPkg::from_node_data(&node);

@@ -74,6 +74,35 @@ pub struct NodeData {
     /// The `overrideDependencyMap` entry replacing the node's own maps
     /// (post-exclusion). The node's requirements are built from these.
     pub masked_deps: Option<MaskedDeps>,
+    /// HSP fields (`ArtifactDepBuilderImpl`): the `hspStoreDir`
+    /// (`oh_modules/.hsp/<saveRootDir>`) and `hspName` (`name.hsp` with
+    /// `/`/`:` -> `+`) for bundle-app HSP packages.
+    pub hsp_store_dir: String,
+    pub hsp_name: String,
+    pub hsp_type: Option<String>,
+    pub is_debug_hsp: bool,
+    pub resolved_hsp: Option<String>,
+    pub integrity_hsp: Option<String>,
+}
+
+/// `ArtifactDepBuilderImpl` — the HSP store-dir/name fields for a bundle-app
+/// HSP package (empty otherwise).
+pub fn hsp_fields(
+    name: &str,
+    package_type: Option<&str>,
+    hsp_type: Option<&str>,
+    save_root_dir: &str,
+) -> (String, String) {
+    if package_type == Some(crate::constants::HSP_PACKAGE_TYPE)
+        && hsp_type == Some(crate::constants::HSP_TYPE_BUNDLE_APP)
+    {
+        (
+            format!("{MY_MODULES}/{}/{save_root_dir}", crate::constants::HSP_DIR),
+            format!("{}.hsp", name.replace('/', "+").replace(':', "+")),
+        )
+    } else {
+        (String::new(), String::new())
+    }
 }
 
 /// The three dependency maps of an `overrideDependencyMap` entry (the mask
@@ -114,6 +143,16 @@ impl NodeData {
     /// `nodeKey` — `name@pinnedSpec`.
     pub fn node_key(&self) -> String {
         format!("{}@{}", self.name, self.pinned_spec)
+    }
+
+    /// `resolveHspStoreDir` — roots resolve to the project root itself;
+    /// otherwise `<projectRoot>/<hspStoreDir>`.
+    pub fn resolve_hsp_store_dir(&self, project_root: &Path) -> PathBuf {
+        if self.is_root {
+            project_root.to_path_buf()
+        } else {
+            project_root.join(&self.hsp_store_dir)
+        }
     }
 }
 
@@ -354,6 +393,12 @@ mod tests {
             unmet: None,
             masked_by_override_dependency_map: false,
             masked_deps: None,
+            hsp_store_dir: String::new(),
+            hsp_name: String::new(),
+            hsp_type: None,
+            is_debug_hsp: false,
+            resolved_hsp: None,
+            integrity_hsp: None,
         })
     }
 

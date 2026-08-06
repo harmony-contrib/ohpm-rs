@@ -41,6 +41,8 @@ pub const ALIAS_PREFIX: &str = "ohpm:";
 pub const WORKSPACE_PREFIX: &str = "workspace:";
 
 /// The HSP hspType values (`HspType.js`).
+pub const HSP_PACKAGE_TYPE: &str = "InterfaceHar";
+pub const HSP_TYPE_BUNDLE_APP: &str = "bundle_app";
 pub const HSP_TYPE_CROSS_APP: &str = "cross_app";
 
 /// The cross-process lock file name at the project root (`oh-lock.lock`).
@@ -72,10 +74,6 @@ pub const DEFAULT_REGISTRY: &str = "https://ohpm.openharmony.cn/ohpm/";
 pub const MIN_PACK_SIZE_MB: u64 = 0;
 pub const MAX_PACK_SIZE_MB: u64 = 500;
 pub const MAX_PACK_SIZE_B: u64 = MAX_PACK_SIZE_MB << 20;
-
-/// HSP package type.
-pub const HSP_PACKAGE_TYPE: &str = "InterfaceHar";
-pub const HSP_TYPE_BUNDLE_APP: &str = "bundle_app";
 
 pub const LATEST: &str = "latest";
 
