@@ -47,6 +47,9 @@ pub struct InstallOptions {
     pub save_dynamic: bool,
     /// `--no-link` — copy source-code deps instead of symlinking.
     pub link: bool,
+    /// `--experimental-concurrently-safe` — the tmp+rename placement (default
+    /// true; the `--no-` negation falls back to direct extraction).
+    pub experimental_concurrently_safe: bool,
     /// `--all` — install all project modules' dependencies.
     pub all: bool,
     /// `--all-modules` (update) — act on every module root.
@@ -76,6 +79,7 @@ impl Default for InstallOptions {
             save_prod: true,
             save_dynamic: false,
             link: true,
+            experimental_concurrently_safe: true,
             all: false,
             all_modules: false,
             tag_filter: None,
@@ -484,6 +488,7 @@ async fn run_pipeline(
         config.clone(),
         project_root.clone(),
         max_concurrent,
+        opts.experimental_concurrently_safe,
     ));
     for graph in &graphs {
         store::install_phase(&store, graph).await?;

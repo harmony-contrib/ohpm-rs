@@ -88,7 +88,7 @@ pub fn parse_at_module(
         };
         let keys: Vec<String> = map.keys().cloned().collect();
         for k in keys {
-            let mut child = map.get(&k).cloned().unwrap_or_default();
+            let child = map.get(&k).cloned().unwrap_or_default();
             let Some(s) = child.as_str().map(|s| s.to_string()) else {
                 continue;
             };

@@ -7,7 +7,7 @@ pub fn output(msg: &str) {
 
 /// Print a success message (green).
 pub fn succeed(msg: &str) {
-    println!("\x1b[32m{msg}\x1b[0m");
+    println!("\x1b[32m{msg}\x1b[39m");
 }
 
 /// Print a warning to stderr (yellow).

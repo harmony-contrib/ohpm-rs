@@ -38,11 +38,13 @@ pub async fn run(args: &UpdateArgs) -> Result<()> {
 
 
     let client = RegistryClient::from_config(&config)?;
-    let outcome = ohpm_core::install::update(&client, &config, &prefix, &args.pkg, &opts).await?;
+    let start = std::time::Instant::now();
+    let _outcome = ohpm_core::install::update(&client, &config, &prefix, &args.pkg, &opts).await?;
+    let elapsed = start.elapsed().as_millis();
     output::succeed(&format!(
-        "update success, {} packages installed, {} modules",
-        outcome.installed,
-        outcome.module_roots.len()
+        "update completed in {}s {}ms",
+        elapsed / 1000,
+        elapsed % 1000
     ));
     Ok(())
 }

@@ -77,6 +77,8 @@ pub struct StoreContext {
     pub project_root: PathBuf,
     /// Bounds the blocking extraction work (`spawn_blocking` + semaphore).
     pub max_concurrent: usize,
+    /// `CONCURRENTLY_SAFE_INSTALL` — the tmp+rename placement (default).
+    pub concurrent_safe: bool,
     downloads: Mutex<HashMap<String, Arc<InFlightCell<Arc<Vec<u8>>>>>>,
     install_promises: Mutex<HashMap<PathBuf, Arc<InFlightCell<()>>>>,
     visited_save_roots: Mutex<std::collections::HashSet<PathBuf>>,
@@ -84,12 +86,19 @@ pub struct StoreContext {
 }
 
 impl StoreContext {
-    pub fn new(client: RegistryClient, config: Config, project_root: PathBuf, max_concurrent: usize) -> Self {
+    pub fn new(
+        client: RegistryClient,
+        config: Config,
+        project_root: PathBuf,
+        max_concurrent: usize,
+        concurrent_safe: bool,
+    ) -> Self {
         StoreContext {
             client,
             config,
             project_root,
             max_concurrent: max_concurrent.max(1),
+            concurrent_safe,
             downloads: Mutex::new(HashMap::new()),
             install_promises: Mutex::new(HashMap::new()),
             visited_save_roots: Mutex::new(std::collections::HashSet::new()),
@@ -366,6 +375,7 @@ async fn install_registry_node(ctx: &StoreContext, node: &Node) -> Result<()> {
         &store_dir,
         bytes.len() as u64,
         &sem,
+        ctx.concurrent_safe,
     )
     .await;
     result.map_err(|e| handle_install_exception(node, &e))?;
@@ -411,26 +421,58 @@ async fn install_local_artifact_node(ctx: &StoreContext, node: &Node) -> Result<
     })?;
     let store_dir = node.data.resolve_pkg_store_dir(&ctx.project_root);
     let sem = Arc::new(Semaphore::new(ctx.max_concurrent));
-    let result = extract_to_store(&path, &store_dir, bytes.len() as u64, &sem).await;
+    let result = extract_to_store(
+        &path,
+        &store_dir,
+        bytes.len() as u64,
+        &sem,
+        ctx.concurrent_safe,
+    )
+    .await;
     result.map_err(|e| handle_install_exception(node, &e))?;
-    // `installLocalArtifact` — the bundle-app HSP `.hsp` entry of the tgz.
-    if node.data.hsp_type.as_deref() == Some(crate::constants::HSP_TYPE_BUNDLE_APP)
-        && node.dep_type != crate::install::node::DepType::Dev
-    {
-        if let Some((_, hsp_entry)) = crate::archive::hsp_detect(&path).ok().flatten() {
-            if let Ok(hsp_bytes) = crate::archive::read_entry_content(&path, &hsp_entry) {
-                if node.data.is_debug_hsp {
-                    log::warn!(
-                        "The installed HSP package \"{}@{}\" was compiled in debugging mode which may cause asset leakage.",
-                        node.data.name,
-                        node.data.pinned_spec
-                    );
-                }
-                place_hsp_file(ctx, node, &hsp_bytes)?;
+    // `installLocalArtifact` — the bundle-app HSP tgz: merge the embedded
+    // interfaceHar (a nested archive, strip 1, sign folder ignored) into the
+    // store, drop the .har/.hsp entries, and place the `.hsp` file.
+    if node.data.hsp_type.as_deref() == Some(crate::constants::HSP_TYPE_BUNDLE_APP) {
+        if let Some((har_entry, hsp_entry)) = crate::archive::hsp_detect(&path).ok().flatten() {
+            if node.data.is_debug_hsp {
+                log::warn!(
+                    "The installed HSP package \"{}@{}\" was compiled in debugging mode which may cause asset leakage.",
+                    node.data.name,
+                    node.data.pinned_spec
+                );
             }
+            if node.dep_type != crate::install::node::DepType::Dev {
+                if let Ok(hsp_bytes) = crate::archive::read_entry_content(&path, &hsp_entry) {
+                    place_hsp_file(ctx, node, &hsp_bytes)?;
+                }
+            }
+            // `extractAndIgnoreTargetFolder(har, store, SignFolderName, 1)`
+            // — the interfaceHar content merges into the store.
+            let har_rel = relative_entry(&har_entry);
+            let har_in_store = store_dir.join(&har_rel);
+            if har_in_store.is_file() {
+                crate::archive::extract_ignore_dir(
+                    &har_in_store,
+                    &store_dir,
+                    1,
+                    SIGN_FOLDER_NAME,
+                )
+                .map_err(|e| OhpmError::install_pkg_to_local_failed().with_detail(&e.message))?;
+                let _ = std::fs::remove_file(&har_in_store);
+            }
+            let hsp_rel = relative_entry(&hsp_entry);
+            let _ = std::fs::remove_file(store_dir.join(&hsp_rel));
         }
     }
     Ok(())
+}
+
+/// The entry path after the strip-1 extraction (drop the leading component).
+fn relative_entry(entry: &str) -> String {
+    let mut parts = entry.split('/');
+    parts.next();
+    parts.collect::<Vec<_>>().join("/")
 }
 
 /// The shared extract path: size check, tmp dir, extract with `.CodeSignature`
@@ -440,20 +482,31 @@ async fn extract_to_store(
     store_dir: &Path,
     size: u64,
     sem: &Arc<Semaphore>,
+    concurrent_safe: bool,
 ) -> Result<()> {
     if size > MAX_PACK_SIZE_B {
         return Err(OhpmError::dep_install_package_size_exceed());
     }
     let archive_path = archive_path.to_path_buf();
     let store_dir = store_dir.to_path_buf();
-    let tmp = store_dir.with_extension(format!("{}.{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
     let _permit = sem.acquire().await.map_err(|_| OhpmError::install_pkg_to_local_failed())?;
     tokio::task::spawn_blocking(move || {
-        std::fs::create_dir_all(&tmp)?;
-        archive::extract_ignore_dir(&archive_path, &tmp, 1, SIGN_FOLDER_NAME)
-            .map_err(|e| OhpmError::install_pkg_to_local_failed().with_detail(&e.message))?;
-        ensure_oh_package_json5(&tmp)?;
-        rename_if_not_exist(&tmp, &store_dir)?;
+        if concurrent_safe {
+            // The tmp dir + atomic rename (the default concurrently-safe
+            // placement, `h()`).
+            let tmp = store_dir.with_extension(format!("{}.{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+            std::fs::create_dir_all(&tmp)?;
+            archive::extract_ignore_dir(&archive_path, &tmp, 1, SIGN_FOLDER_NAME)
+                .map_err(|e| OhpmError::install_pkg_to_local_failed().with_detail(&e.message))?;
+            ensure_oh_package_json5(&tmp)?;
+            rename_if_not_exist(&tmp, &store_dir)?;
+        } else {
+            // `g()` — extract directly into the store dir.
+            std::fs::create_dir_all(&store_dir)?;
+            archive::extract_ignore_dir(&archive_path, &store_dir, 1, SIGN_FOLDER_NAME)
+                .map_err(|e| OhpmError::install_pkg_to_local_failed().with_detail(&e.message))?;
+            ensure_oh_package_json5(&store_dir)?;
+        }
         Ok::<(), OhpmError>(())
     })
     .await

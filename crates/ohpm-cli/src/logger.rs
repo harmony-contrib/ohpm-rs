@@ -26,7 +26,15 @@ impl log::Log for ConsoleLogger {
             log::Level::Debug | log::Level::Trace => LEVEL_DEBUG,
         };
         if bits <= CURRENT.load(Ordering::Relaxed) {
-            eprintln!("{}: {}", record.level(), record.args());
+            // `Log4js` — `ohpm {LEVEL}: {message}` with the level colors
+            // (warn yellow, error red, debug grey, info plain).
+            let (level, color) = match record.level() {
+                log::Level::Error => ("ERROR", "\x1b[31m"),
+                log::Level::Warn => ("WARN", "\x1b[33m"),
+                log::Level::Debug | log::Level::Trace => ("DEBUG", "\x1b[90m"),
+                log::Level::Info => ("INFO", ""),
+            };
+            eprintln!("{color}ohpm {level}: {}\x1b[39m", record.args());
         }
     }
 

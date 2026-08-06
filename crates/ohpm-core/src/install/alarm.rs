@@ -75,15 +75,23 @@ impl StrictConflictAlarm {
         }
     }
 
-    /// `alarmConflictMessage` — the strict mode prints every conflict as an
-    /// error (the unicode dependency graphs are not rendered in this port).
+    /// `alarmConflictMessage` — the strict mode prints the conflictVersionAlarm
+    /// messages (verified against ohpm 6.0.1): the bold header (with the
+    /// resolve-conflict suffix) and one warn per conflict with the affected
+    /// modules. The reference's unicode-graph printing is unreachable there
+    /// (an array `size` check that never fires).
     pub fn print(&self) {
+        let header = "Found version conflict(s) in dependencies of project, and we have helped you resolve it automatically.";
+        log::warn!("\x1b[93m\x1b[40m\x1b[1m{header}\x1b[22m\x1b[49m\x1b[39m");
         for record in self.records.values() {
             let versions: Vec<String> = record.version_set.iter().cloned().collect();
-            log::error!(
-                "dependency \"{}\" has conflict versions: \"{}\" and we can not resolve.",
+            let modules: Vec<String> = record.which_modules.iter().cloned().collect();
+            log::warn!(
+                "dependency \"{}\" has conflict versions: \"{}\", and has been resolved as \"{}\", the affected modules are as follows:\n\t - \"{}\"\n",
                 record.package_name,
-                versions.join("\", \"")
+                versions.join("\", \""),
+                record.resolved_version,
+                modules.join("\"\n\t - \"")
             );
         }
     }

@@ -4,8 +4,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::constants::BUILD_PROFILE;
+
+/// The build profile is a singleton in the reference — the OHMUrl warning
+/// fires at most once per process.
+static OHMURL_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// The parsed `build-profile.json5` project (mirrors `projectBuildProfile`).
 #[derive(Debug, Clone, Default)]
@@ -44,8 +49,13 @@ impl ProjectBuildProfile {
             .and_then(|a| a.get("products"))
             .and_then(|p| p.as_array())
         else {
+            Self::warn_ohmurl_once();
             return;
         };
+        if products.is_empty() {
+            Self::warn_ohmurl_once();
+            return;
+        }
         for product in products {
             let mut v = product;
             let mut found = true;
@@ -62,6 +72,16 @@ impl ProjectBuildProfile {
                 self.use_ohmurl = true;
                 break;
             }
+        }
+    }
+
+    /// `loadOHMUrlConfig fail` — at most once per process.
+    fn warn_ohmurl_once() {
+        if !OHMURL_WARNED.swap(true, Ordering::SeqCst) {
+            log::warn!(
+                "loadOHMUrlConfig fail, can not find \"products\" in project-level {}",
+                BUILD_PROFILE
+            );
         }
     }
 

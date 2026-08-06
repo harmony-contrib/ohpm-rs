@@ -265,6 +265,11 @@ pub struct InstallArgs {
     /// Do actual copy instead of symbolic link for source-code dependencies.
     #[arg(long = "no-link")]
     pub no_link: bool,
+    /// Install the dependencies in the concurrently safe mode (the
+    /// reference's flag is always true — the option surface is kept for
+    /// parity).
+    #[arg(long = "experimental-concurrently-safe")]
+    pub experimental_concurrently_safe: bool,
     /// Install the dependencies of all modules in the project.
     #[arg(long)]
     pub all: bool,

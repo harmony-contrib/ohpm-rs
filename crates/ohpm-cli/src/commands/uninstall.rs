@@ -37,12 +37,14 @@ pub async fn run(args: &UninstallArgs) -> Result<()> {
 
 
     let client = RegistryClient::from_config(&config)?;
-    let outcome =
+    let start = std::time::Instant::now();
+    let _outcome =
         ohpm_core::install::uninstall(&client, &config, &prefix, &args.pkg, &opts).await?;
+    let elapsed = start.elapsed().as_millis();
     output::succeed(&format!(
-        "uninstall success, {} packages installed, {} modules",
-        outcome.installed,
-        outcome.module_roots.len()
+        "uninstall completed in {}s {}ms",
+        elapsed / 1000,
+        elapsed % 1000
     ));
     Ok(())
 }

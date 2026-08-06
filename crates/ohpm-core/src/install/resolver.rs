@@ -195,10 +195,6 @@ impl Resolver {
                     .unwrap_or_else(|| node.fetch_spec.clone()),
             );
         }
-        // Strict mode skips names that already failed resolution.
-        if self.resolve_failed.lock().unwrap_or_else(|e| e.into_inner()).contains(&node.name) {
-            return Ok(());
-        }
         // Unified mode: a max that is a module root nobody depends on is
         // replaced directly (`updateMaxSatisfyingVersion`'s unified guard).
         if self.unified {
@@ -232,6 +228,12 @@ impl Resolver {
         } else {
             crate::install::version_conflict::Strategy::Max
         };
+        // Strict mode skips names that already failed resolution
+        // (`updateMaxSatisfyingVersion` — the version/fetch collection above
+        // still runs, like the reference).
+        if self.resolve_failed.lock().unwrap_or_else(|e| e.into_inner()).contains(&node.name) {
+            return Ok(());
+        }
         let is_max = {
             // `getMaxSatisfyingVersionCache` — the merged view, local wins.
             let prev = {
