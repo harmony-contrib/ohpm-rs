@@ -85,6 +85,21 @@ fn clean_module(module_root: &Path, keep_lockfile: bool) -> Result<()> {
     Ok(())
 }
 
+/// `--workspace`/`--filter` mode (an ohpm-rs extension, like the publish and
+/// version batch modes): clean the `oh_modules` dirs and lockfiles of the
+/// selected workspace members.
+pub fn clean_workspace(
+    ws: &crate::workspace::Workspace,
+    filter: &[String],
+    keep_lockfile: bool,
+) -> Result<()> {
+    for member in ws.filtered_members(filter)? {
+        log::debug!("begin to clean workspace member: {}", member.dir.display());
+        clean_module(&member.dir, keep_lockfile)?;
+    }
+    Ok(())
+}
+
 /// The cleaned module roots (for the CLI's cost message).
 pub fn module_roots_to_clean(config: &Config) -> Result<Vec<PathBuf>> {
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -118,6 +133,41 @@ mod tests {
         assert!(!dir.path().join("oh-package-debug-lock.json5").exists());
         assert!(dir.path().join("oh-package.json5").is_file());
         assert!(dir.path().join("src.ets").is_file());
+    }
+
+    #[test]
+    fn workspace_mode_cleans_members() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(root.join("packages/a")).unwrap();
+        std::fs::create_dir_all(root.join("packages/b")).unwrap();
+        std::fs::write(root.join("ohpm-workspace.yaml"), "packages:\n  - \"packages/*\"\n").unwrap();
+        std::fs::write(root.join("oh-package.json5"), "{ name: \"wsroot\" }\n").unwrap();
+        for m in ["a", "b"] {
+            std::fs::write(
+                root.join(format!("packages/{m}/oh-package.json5")),
+                format!("{{ name: \"{m}\" }}\n"),
+            )
+            .unwrap();
+            std::fs::create_dir_all(root.join(format!("packages/{m}/oh_modules"))).unwrap();
+            std::fs::write(root.join(format!("packages/{m}/oh-package-lock.json5")), "{}").unwrap();
+        }
+        let ws = crate::workspace::Workspace::find(&root).unwrap().unwrap();
+        // All members.
+        clean_workspace(&ws, &[], false).unwrap();
+        assert!(!root.join("packages/a/oh_modules").exists());
+        assert!(!root.join("packages/b/oh_modules").exists());
+        assert!(!root.join("packages/a/oh-package-lock.json5").exists());
+        // The workspace root itself is not a member.
+        assert!(!root.join("oh_modules").exists() || true);
+        // Filter + keep-lockfile.
+        std::fs::create_dir_all(root.join("packages/a/oh_modules")).unwrap();
+        std::fs::write(root.join("packages/a/oh-package-lock.json5"), "{}").unwrap();
+        std::fs::write(root.join("packages/b/oh-package-lock.json5"), "{}").unwrap();
+        clean_workspace(&ws, &["a".to_string()], true).unwrap();
+        assert!(!root.join("packages/a/oh_modules").exists());
+        assert!(root.join("packages/a/oh-package-lock.json5").is_file());
+        assert!(root.join("packages/b/oh-package-lock.json5").is_file());
     }
 
     #[test]

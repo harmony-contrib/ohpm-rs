@@ -253,6 +253,12 @@ pub struct CleanArgs {
     /// Do not delete the 'oh-package-lock.json5' file.
     #[arg(long = "keep-lockfile", alias = "kl")]
     pub keep_lockfile: bool,
+    /// Clean every workspace member (workspace batch mode).
+    #[arg(long)]
+    pub workspace: bool,
+    /// Only clean the listed workspace members (by name, comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub filter: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
