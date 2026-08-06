@@ -29,6 +29,8 @@ pub async fn run(args: &InstallArgs) -> Result<()> {
         link: !args.no_link,
         all: args.all,
         prefix: Some(prefix.clone()),
+        parameter_file: args.parameter_file.as_deref().map(std::path::PathBuf::from),
+        target_path: args.target_path.as_deref().map(std::path::PathBuf::from),
         registry: args.registry.clone(),
         fetch_timeout: args.fetch_timeout,
         strict_ssl: args.strict_ssl,

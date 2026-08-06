@@ -193,6 +193,7 @@ fn packument_response(
         let mut entry = serde_json::json!({
             "name": name,
             "version": version,
+            "_ohpmVersion": "1",
             "dist": dist,
         });
         if !mv.deps.is_empty() {
@@ -647,4 +648,338 @@ async fn uninstall_removes_package() {
     .await
     .unwrap_err();
     assert_eq!(err.code, "UpdateHasVersion");
+}
+
+#[tokio::test]
+async fn override_dependency_map_masks_node_deps() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let (registry, _tarballs) = sample_registry(work.path());
+    let (addr, _registry, capture) = spawn_mock(registry).await;
+
+    let prefix = work.path().join("entry");
+    std::fs::create_dir_all(&prefix).unwrap();
+    std::fs::write(
+        prefix.join("oh-package.json5"),
+        "{\n  name: \"entry\", version: \"1.0.0\",\n  dependencies: { \"@ohos/foo\": \"^1.2.0\" },\n  overrideDependencyMap: { \"@ohos/foo\": \"./foo-override.json5\" },\n}\n",
+    )
+    .unwrap();
+    // The override entry REPLACES foo's own maps: bar is dropped, unittest is
+    // injected instead.
+    std::fs::write(
+        prefix.join("foo-override.json5"),
+        "{ dependencies: { \"unittest\": \"1.0.0\" } }\n",
+    )
+    .unwrap();
+    let cfg = load_config(home.path(), &addr, cache.path());
+
+    let outcome = run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    assert_eq!(outcome.installed, 2, "foo + unittest; bar must not be installed");
+
+    // The masked node's requirements come from the override entry — bar is
+    // never resolved.
+    let cap = capture.lock().unwrap();
+    assert!(!cap.packument_gets.iter().any(|n| n == "@ohos/bar"), "bar not fetched: {:?}", cap.packument_gets);
+    drop(cap);
+
+    // Lockfile: the package keeps its ORIGINAL deps (bar) and carries the
+    // masked tag (`addOrRemoveOverrideDependencyMapTag`).
+    let lock: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap(),
+    )
+    .unwrap();
+    let foo_pkg = &lock["packages"]["@ohos/foo@1.2.3"];
+    assert_eq!(foo_pkg["dependencies"]["@ohos/bar"], "^1.0.0");
+    assert_eq!(foo_pkg["maskedByOverrideDependencyMap"], true);
+    assert!(lock["packages"]["@ohos/bar@1.0.0"].is_null(), "no bar in the lockfile");
+
+    // Install record: the masked package shows the override deps and the tag;
+    // the record's overrideDependencyMap carries the override entry.
+    let record: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh_modules/.ohpm/lock.json5")).unwrap(),
+    )
+    .unwrap();
+    let rec_foo = &record["packages"]["@ohos/foo@1.2.3"];
+    assert_eq!(rec_foo["maskedByOverrideDependencyMap"], true);
+    assert_eq!(rec_foo["dependencies"]["unittest"], "1.0.0");
+    assert!(rec_foo["dependencies"]["@ohos/bar"].is_null());
+    assert_eq!(
+        record["overrideDependencyMap"]["@ohos/foo"]["dependencies"]["unittest"],
+        "1.0.0"
+    );
+    // The project module entry itself is not masked (roots never are).
+    assert_eq!(record["modules"]["."]["maskedByOverrideDependencyMap"], false);
+}
+
+#[tokio::test]
+async fn exclusions_remove_deps_from_node() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let (registry, _tarballs) = sample_registry(work.path());
+    let (addr, _registry, capture) = spawn_mock(registry).await;
+
+    let prefix = work.path().join("entry");
+    std::fs::create_dir_all(&prefix).unwrap();
+    std::fs::write(
+        prefix.join("oh-package.json5"),
+        "{\n  name: \"entry\", version: \"1.0.0\",\n  dependencies: { \"@ohos/foo\": \"^1.2.0\" },\n  exclusions: { \"@ohos/foo\": [\"@ohos/bar\"] },\n}\n",
+    )
+    .unwrap();
+    let cfg = load_config(home.path(), &addr, cache.path());
+
+    let outcome = run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    assert_eq!(outcome.installed, 1, "foo only — bar excluded");
+
+    let cap = capture.lock().unwrap();
+    assert!(!cap.packument_gets.iter().any(|n| n == "@ohos/bar"), "bar not fetched: {:?}", cap.packument_gets);
+    drop(cap);
+
+    // Lockfile: the exclusion mutates the node's own maps, so the package's
+    // deps are the post-exclusion view; the masked tag is written.
+    let lock: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap(),
+    )
+    .unwrap();
+    let foo_pkg = &lock["packages"]["@ohos/foo@1.2.3"];
+    assert!(foo_pkg["dependencies"]["@ohos/bar"].is_null());
+    assert_eq!(foo_pkg["maskedByOverrideDependencyMap"], true);
+
+    // Install record: the final map records foo's remaining (empty) deps.
+    let record: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh_modules/.ohpm/lock.json5")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["packages"]["@ohos/foo@1.2.3"]["maskedByOverrideDependencyMap"], true);
+    assert!(
+        record["packages"]["@ohos/foo@1.2.3"]["dependencies"]
+            .as_object()
+            .is_some_and(|d| d.is_empty()),
+        "foo's record deps must be the post-exclusion (empty) view"
+    );
+    let ex_final = &record["overrideDependencyMap"]["@ohos/foo"];
+    assert!(ex_final["dependencies"].is_object() && ex_final["dependencies"].as_object().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn version_conflict_resolves_to_max() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+
+    // foo requires bar@^1.0.0 (pins 1.0.0), conflictee requires bar@^2.0.0
+    // (pins 2.0.0) — a version conflict, resolved to the max (2.0.0).
+    let mut registry = MockRegistry::default();
+    let bar_100 = build_har(work.path(), "@ohos/bar", "1.0.0", &BTreeMap::new());
+    let bar_200 = build_har(work.path(), "@ohos/bar", "2.0.0", &BTreeMap::new());
+    registry.packages.insert(
+        "@ohos/bar".to_string(),
+        MockPackage {
+            versions: BTreeMap::from([
+                ("1.0.0".to_string(), MockVersion { tarball: bar_100, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
+                ("2.0.0".to_string(), MockVersion { tarball: bar_200, deps: BTreeMap::new(), dev_deps: BTreeMap::new() }),
+            ]),
+            dist_tags: BTreeMap::from([("latest".to_string(), "2.0.0".to_string())]),
+        },
+    );
+    let mut foo_deps = BTreeMap::new();
+    foo_deps.insert("@ohos/bar".to_string(), "^1.0.0".to_string());
+    let foo_123 = build_har(work.path(), "@ohos/foo", "1.2.3", &foo_deps);
+    registry.packages.insert(
+        "@ohos/foo".to_string(),
+        MockPackage {
+            versions: BTreeMap::from([("1.2.3".to_string(), MockVersion { tarball: foo_123, deps: foo_deps, dev_deps: BTreeMap::new() })]),
+            dist_tags: BTreeMap::from([("latest".to_string(), "1.2.3".to_string())]),
+        },
+    );
+    let mut conflict_deps = BTreeMap::new();
+    conflict_deps.insert("@ohos/bar".to_string(), "^2.0.0".to_string());
+    let conflict_100 = build_har(work.path(), "conflictee", "1.0.0", &conflict_deps);
+    registry.packages.insert(
+        "conflictee".to_string(),
+        MockPackage {
+            versions: BTreeMap::from([("1.0.0".to_string(), MockVersion { tarball: conflict_100, deps: conflict_deps, dev_deps: BTreeMap::new() })]),
+            dist_tags: BTreeMap::from([("latest".to_string(), "1.0.0".to_string())]),
+        },
+    );
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
+
+    let prefix = work.path().join("entry");
+    write_manifest(&prefix, "{ \"@ohos/foo\": \"^1.2.0\", \"conflictee\": \"^1.0.0\" }", "{}");
+    let cfg = load_config(home.path(), &addr, cache.path());
+
+    let outcome = run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    assert_eq!(outcome.installed, 3, "foo + conflictee + bar@2.0.0 only");
+
+    // Lockfile: both bar specifiers point at 2.0.0; the 1.0.0 package entry
+    // was deleted by `resolveVersionConflict2LockFile`.
+    let lock: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap(),
+    )
+    .unwrap();
+    let specifiers = lock["specifiers"].as_object().unwrap();
+    assert_eq!(specifiers["@ohos/bar@^1.0.0"], "@ohos/bar@2.0.0");
+    assert_eq!(specifiers["@ohos/bar@^2.0.0"], "@ohos/bar@2.0.0");
+    let packages = lock["packages"].as_object().unwrap();
+    assert!(packages.contains_key("@ohos/bar@2.0.0"));
+    assert!(!packages.contains_key("@ohos/bar@1.0.0"), "old version pruned: {:?}", packages.keys());
+
+    // Symlinks: every bar edge resolves to the max version.
+    let bar_link = std::fs::read_link(
+        prefix.join("oh_modules/.ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/bar"),
+    )
+    .unwrap();
+    assert_eq!(
+        bar_link,
+        PathBuf::from("../../../@ohos+bar@2.0.0/oh_modules/@ohos/bar"),
+        "foo's bar edge must resolve to 2.0.0"
+    );
+
+    // Install record: foo's dependencies show the resolved version.
+    let record: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh_modules/.ohpm/lock.json5")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["packages"]["@ohos/foo@1.2.3"]["dependencies"]["@ohos/bar"], "2.0.0");
+    assert!(!record["packages"].as_object().unwrap().contains_key("@ohos/bar@1.0.0"));
+}
+
+#[tokio::test]
+async fn parameterized_install_substitutes_deps() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let (registry, _tarballs) = sample_registry(work.path());
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
+
+    let prefix = work.path().join("entry");
+    std::fs::create_dir_all(&prefix).unwrap();
+    // The manifest's dependency spec is parameterized via `parameterFile`.
+    std::fs::write(
+        prefix.join("oh-package.json5"),
+        "{\n  name: \"entry\", version: \"1.0.0\",\n  dependencies: { \"@ohos/foo\": \"@param:deps.foo\" },\n  parameterFile: \"./params.json5\",\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        prefix.join("params.json5"),
+        "{ deps: { foo: \"^1.2.0\" } }\n",
+    )
+    .unwrap();
+    let cfg = load_config(home.path(), &addr, cache.path());
+
+    let outcome = run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    assert_eq!(outcome.installed, 2, "foo + bar (via ^1.2.0 -> 1.2.3)");
+
+    // The lockfile specifier reflects the substituted spec.
+    let lock: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap(),
+    )
+    .unwrap();
+    let specifiers = lock["specifiers"].as_object().unwrap();
+    assert_eq!(specifiers["@ohos/foo@^1.2.0"], "@ohos/foo@1.2.3");
+
+    // `ohpm install <pkg>` with a parameterized project is forbidden.
+    let err = run_install(&cfg, &prefix, &["@ohos/bar".to_string()], &InstallOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "ParameterizationForbiddenInstallError");
+
+    // The CLI `--parameter-file` option overrides the manifest field.
+    let prefix2 = work.path().join("entry2");
+    std::fs::create_dir_all(&prefix2).unwrap();
+    std::fs::write(
+        prefix2.join("oh-package.json5"),
+        "{\n  name: \"entry2\", version: \"1.0.0\",\n  dependencies: { \"@ohos/foo\": \"@param:deps.foo\" },\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        prefix2.join("cli-params.json5"),
+        "{ deps: { foo: \"^1.2.0\" } }\n",
+    )
+    .unwrap();
+    let opts = InstallOptions {
+        parameter_file: Some(prefix2.join("cli-params.json5")),
+        ..Default::default()
+    };
+    let outcome = run_install(&cfg, &prefix2, &[], &opts).await.unwrap();
+    assert_eq!(outcome.installed, 2);
+    // A missing CLI parameter file errors.
+    let opts = InstallOptions {
+        parameter_file: Some(prefix2.join("missing.json5")),
+        ..Default::default()
+    };
+    let err = run_install(&cfg, &prefix2, &[], &opts).await.unwrap_err();
+    assert_eq!(err.code, "CliInputParameterFileNotExist");
+}
+
+#[tokio::test]
+async fn target_install_uses_dependency_map() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let (registry, _tarballs) = sample_registry(work.path());
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
+
+    // A project with a build-profile declaring the module.
+    let prefix = work.path().join("proj");
+    std::fs::create_dir_all(prefix.join("entry")).unwrap();
+    std::fs::write(
+        prefix.join("build-profile.json5"),
+        "{ app: { products: [] }, modules: [{ name: \"entry\", srcPath: \"./entry\" }] }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        prefix.join("entry/oh-package.json5"),
+        "{ name: \"entry\", version: \"1.0.0\", dependencies: { \"@ohos/foo\": \"^1.2.0\" } }\n",
+    )
+    .unwrap();
+
+    // The target directory with a dependencyMap (targetName "debug").
+    let target = work.path().join("target-debug");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(
+        target.join("dependencyMap.json5"),
+        "{\n  targetName: \"debug\",\n  basePath: \"..\",\n  dependencyMap: { entry: \"../proj/entry/oh-package.json5\" },\n  modules: [{ name: \"entry\", srcPath: \"./proj/entry\" }],\n}\n",
+    )
+    .unwrap();
+    let cfg = load_config(home.path(), &addr, cache.path());
+    let opts = InstallOptions {
+        target_path: Some(target.clone()),
+        ..Default::default()
+    };
+
+    let outcome = run_install(&cfg, &prefix, &[], &opts).await.unwrap();
+    assert_eq!(outcome.installed, 2, "foo + bar");
+    assert_eq!(outcome.module_roots, vec![prefix.join("entry")], "module roots from the dependencyMap");
+
+    // The lockfile uses the target name.
+    let lock_path = prefix.join("entry/oh-package-debug-lock.json5");
+    assert!(lock_path.is_file(), "target lockfile name");
+    let lock: Value = json5::from_str(&std::fs::read_to_string(&lock_path).unwrap()).unwrap();
+    assert_eq!(lock["specifiers"]["@ohos/foo@^1.2.0"], "@ohos/foo@1.2.3");
+    assert!(!prefix.join("entry/oh-package-lock.json5").exists());
+
+    // The resolve-conflict snapshot manifest records the resolved versions.
+    let snapshot = std::fs::read_to_string(
+        target.join("resolve-conflict/entry/oh-package.json5"),
+    )
+    .unwrap();
+    let snapshot: Value = json5::from_str(&snapshot).unwrap();
+    assert_eq!(snapshot["dependencies"]["@ohos/foo"], "1.2.3");
 }

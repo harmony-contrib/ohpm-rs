@@ -5,12 +5,20 @@
 //! store → linking, in a single program. `install`, `update` and `uninstall`
 //! share one pipeline (`run_pipeline`), like the reference's `installModules`.
 
+pub mod alarm;
+pub mod exclusions;
+pub mod filelock;
 pub mod git;
 pub mod graph;
+pub mod hooks;
 pub mod lock_record;
+pub mod version_conflict;
 pub mod lockfile;
+pub mod mtime;
 pub mod modules;
+pub mod parameter;
 pub mod node;
+pub mod overrides;
 pub mod packument;
 pub mod resolver;
 pub mod root;
@@ -18,6 +26,7 @@ pub mod semver;
 pub mod spec;
 pub mod store;
 pub mod symlink;
+pub mod targets;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,6 +55,10 @@ pub struct InstallOptions {
     pub tag_filter: Option<String>,
     /// `--prefix`.
     pub prefix: Option<PathBuf>,
+    /// `--parameter-file` — the parameter file path (parameterization).
+    pub parameter_file: Option<PathBuf>,
+    /// `--target_path` — the install-targets context (Task 4).
+    pub target_path: Option<PathBuf>,
     pub registry: Option<String>,
     pub fetch_timeout: Option<u64>,
     pub strict_ssl: Option<bool>,
@@ -66,6 +79,8 @@ impl Default for InstallOptions {
             all_modules: false,
             tag_filter: None,
             prefix: None,
+            parameter_file: None,
+            target_path: None,
             registry: None,
             fetch_timeout: None,
             strict_ssl: None,
@@ -112,6 +127,19 @@ pub async fn install(
     args: &[String],
     opts: &InstallOptions,
 ) -> Result<InstallOutcome> {
+    // `checkInvalidCmdWhileParameterization` — installing named packages is
+    // forbidden while the project is parameterized.
+    let project_root = crate::config::find_project_root(prefix)
+        .map(|p| p.clone())
+        .unwrap_or_else(|| prefix.to_path_buf());
+    let parameterized = parameter::Parameterization::setup(config, &project_root, opts.parameter_file.as_deref())?
+        .is_some();
+    if parameterized && !args.is_empty() {
+        return Err(OhpmError::new(
+            "ParameterizationForbiddenInstallError",
+            "The \"ohpm install <pkg>\" command cannot be executed when the \"parameterFile\" is configured.",
+        ));
+    }
     let outcome = run_pipeline(client, config, prefix, args, opts, InstallCommand::Install).await?;
     Ok(InstallOutcome {
         module_roots: outcome.module_roots,
@@ -190,8 +218,12 @@ async fn run_pipeline(
         .retry_interval
         .unwrap_or(config.get_number(types::RETRY_INTERVAL) as u64);
 
+    // 0. cross-process lock (`enable_cross_process_lock`, default off).
+    let _lock = filelock::OhpmLock::acquire(config, prefix).await?;
+
     // 1. module roots + project root (build-profile based). The `install_all`
-    // config defaults to true (`getModuleRootDirs` reads it too).
+    // config defaults to true (`getModuleRootDirs` reads it too). Target mode
+    // (`--target_path`) switches the module roots to the dependencyMap's.
     let install_all = opts.all || config.get_bool(types::INSTALL_ALL);
     let project = crate::config::find_project_root(prefix)
         .and_then(|p| modules::ProjectBuildProfile::load(&p));
@@ -199,25 +231,67 @@ async fn run_pipeline(
         .as_ref()
         .map(|p| p.project_root.clone())
         .unwrap_or_else(|| prefix.to_path_buf());
-    let module_roots = modules::module_roots(prefix, install_all, project.as_ref());
+    let mut targets = targets::TargetManager::new();
+    if let Some(target_path) = &opts.target_path {
+        targets::TargetManager::validate_target_path(&target_path.to_string_lossy())?;
+        targets.init(target_path, &project_root)?;
+    }
+    let module_roots = if targets.is_target_mod() {
+        targets::target_module_roots(&targets, prefix, install_all, project.as_ref())?
+    } else {
+        modules::module_roots(prefix, install_all, project.as_ref())
+    };
+    let lock_name = if targets.need_change_lock_file_name() {
+        lockfile::lock_file_name(&targets.get_target_name())
+    } else {
+        lockfile::lock_file_name("")
+    };
+
+    // 1b. lifecycle hooks — preInstall / preUninstall.
+    let root_refs: Vec<&std::path::Path> = module_roots.iter().map(|p| p.as_path()).collect();
+    match command {
+        InstallCommand::Install | InstallCommand::Update => {
+            hooks::run_hooks(&root_refs, hooks::HookEvent::PreInstall)?;
+        }
+        InstallCommand::Uninstall => {
+            hooks::run_hooks(&root_refs, hooks::HookEvent::PreUninstall)?;
+        }
+    }
 
     // 2. root nodes + CLI input (`getRootNodeForInstallation`: UPDATE with
     // `--all-modules`, or the prefix module, gets the CLI input handling).
     let workspace = crate::workspace::Workspace::find(prefix)?;
+    // `validParameterFileConfig` — parameterization (None when not configured).
+    let parameter = parameter::Parameterization::setup(config, &project_root, opts.parameter_file.as_deref())?;
     let resolver = Arc::new(resolver::Resolver::new(
         client.clone(),
         config.clone(),
         project_root.clone(),
         workspace,
-    ));
+        parameter.as_ref(),
+        &lock_name,
+    )?);
     let mut roots: Vec<(PathBuf, Arc<node::Node>)> = Vec::new();
     let mut cli_input_names = Vec::new();
     let handle_cli_on_all = command == InstallCommand::Update && opts.all_modules;
     for module_root in &module_roots {
-        let mut root = root::get_root_node(module_root, opts.link, project.as_ref())?;
+        let mut root = root::get_root_node(module_root, opts.link, project.as_ref(), parameter.as_ref())?;
+        // Target mode: the module manifest may come from the dependencyMap.
+        if let Some(manifest) = targets.target_module_manifest(module_root) {
+            if !manifest.is_null() && manifest.as_object().is_some_and(|m| !m.is_empty()) {
+                let text = serde_json::to_string(&manifest).unwrap_or_default();
+                let mut manifest = crate::package::Manifest::from_json5(&text)?;
+                if let Some(p) = parameter.as_ref() {
+                    let mut value = manifest.to_json();
+                    p.parse_value(&manifest.name, &mut value)?;
+                    manifest = serde_json::from_value(value)?;
+                }
+                root = root::root_node_from_manifest(module_root, &manifest, opts.link, project.as_ref())?;
+            }
+        }
         if handle_cli_on_all || module_root == prefix {
             cli_input_names =
-                root::handle_cli_input(module_root, args, &mut root, opts, command)?;
+                root::handle_cli_input(module_root, args, &mut root, opts, command, parameter.as_ref())?;
         }
         roots.push((module_root.clone(), Arc::new(root)));
     }
@@ -244,6 +318,59 @@ async fn run_pipeline(
         .await?;
         graphs.push(graph);
     }
+
+    // 3b. alarms + conflict resolution (mirrors `installModules`):
+    // `recordConflictMessage` then `resolveConflictInAllGraphs` — the lockers
+    // are rewritten to the max-satisfying versions; the graphs were already
+    // flattened by `build_graphs` (pickNode/flatGraph consult the final cache
+    // in resolve mode).
+    let mut strict_alarm = crate::install::alarm::StrictConflictAlarm::new();
+    {
+        let versions = resolver.versions.lock().await.clone();
+        let fetch_specs = resolver.fetch_specs.lock().await.clone();
+        let max_versions: std::collections::BTreeMap<String, String> = resolver
+            .max_satisfying
+            .lock()
+            .await
+            .iter()
+            .chain(resolver.max_local.lock().await.iter())
+            .map(|(k, v)| (k.clone(), v.pinned_spec.clone()))
+            .collect();
+        for (graph, (module_root, _)) in graphs.iter().zip(&roots) {
+            if resolver.strict_mode {
+                strict_alarm.record(
+                    graph,
+                    &module_root.to_string_lossy(),
+                    &versions,
+                    &fetch_specs,
+                    &max_versions,
+                );
+            }
+        }
+        if resolver.resolve_conflict {
+            for (graph, (module_root, _)) in graphs.iter().zip(&roots) {
+                resolver
+                    .resolve_conflict_to_lockfile(module_root, graph)
+                    .await?;
+            }
+        }
+    }
+    if resolver.strict_mode {
+        strict_alarm.print();
+    }
+
+    // 3c. name-consistency alarms — `enforce_dependency_key` or the
+    // build-profile OHMUrl config makes the inconsistencies an error.
+    let enforce = config.get_bool(types::ENFORCE_DEPENDENCY_KEY)
+        || project.as_ref().map(|p| p.use_ohmurl()).unwrap_or(false);
+    let mut name_alarm = crate::install::alarm::NameInconsistencyAlarm::new(enforce);
+    let mut case_alarm = crate::install::alarm::CaseInconsistencyAlarm::new();
+    for graph in &graphs {
+        name_alarm.record(graph);
+        case_alarm.record(graph);
+    }
+    name_alarm.print()?;
+    case_alarm.print();
 
     // 4. install phase (download/extract into the store).
     let store = Arc::new(store::StoreContext::new(
@@ -274,10 +401,58 @@ async fn run_pipeline(
         resolve_conflict_strict: config.get_bool(types::RESOLVE_CONFLICT_STRICT),
         install_all,
     };
-    let record = lock_record::resolve(&graphs, &project_root, &settings);
+    let record = lock_record::resolve(
+        &graphs,
+        &project_root,
+        &settings,
+        resolver.overrides.as_ref(),
+        resolver.exclusions.lock().await.as_ref(),
+    );
     lock_record::write_lock_record(&project_root, &record)?;
 
-    // 7. manifest update (command-dependent).
+    // 7. manifest update (command-dependent). Target mode writes the resolved
+    // module manifests into `<target>/resolve-conflict/<module>`
+    // (`savePackageJsonOfResolveConflict`).
+    if targets.is_target_mod() && command == InstallCommand::Install && opts.save {
+        for (module_root, root) in &roots {
+            let dir = targets.get_resolve_conflict_path(module_root);
+            std::fs::create_dir_all(&dir)?;
+            let manifest_path = dir.join(crate::constants::MY_PACKAGE_JSON);
+            let mut manifest: serde_json::Value = std::fs::read_to_string(&manifest_path)
+                .ok()
+                .and_then(|t| json5::from_str(&t).ok())
+                .unwrap_or_else(|| {
+                    targets
+                        .target_module_manifest(module_root)
+                        .unwrap_or_else(|| serde_json::json!({}))
+                });
+            for key in ["dependencies", "devDependencies", "dynamicDependencies"] {
+                let Some(map) = manifest.get_mut(key).and_then(|m| m.as_object_mut()) else {
+                    continue;
+                };
+                for (name, spec) in map.iter_mut() {
+                    let Some(req) = root.requirements.get(name) else {
+                        continue;
+                    };
+                    // `d()` — the resolved version from the locker (local deps
+                    // keep their path spec).
+                    if crate::install::spec::is_local_dependency(&req.spec) {
+                        continue;
+                    }
+                    let rel = crate::install::lockfile::relative_spec(module_root, &req.spec);
+                    if let Some(locked) = resolver
+                        .with_locker(module_root, |locker| locker.get_lock_spec(name, &rel))
+                        .await
+                    {
+                        if let Ok((_, version)) = crate::install::lockfile::parse_spec_key(&locked) {
+                            *spec = serde_json::Value::String(version);
+                        }
+                    }
+                }
+            }
+            std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+        }
+    }
     match command {
         InstallCommand::Install => {
             if let Some(updated) = root::update_command_line_input_dependencies(
@@ -304,6 +479,16 @@ async fn run_pipeline(
             if let Some((_, root)) = roots.iter().find(|(d, _)| d == prefix) {
                 root::update_pkg_json(prefix, &root.requirements, opts, None)?;
             }
+        }
+    }
+
+    // 7b. lifecycle hooks — postInstall / postUninstall.
+    match command {
+        InstallCommand::Install | InstallCommand::Update => {
+            hooks::run_hooks(&root_refs, hooks::HookEvent::PostInstall)?;
+        }
+        InstallCommand::Uninstall => {
+            hooks::run_hooks(&root_refs, hooks::HookEvent::PostUninstall)?;
         }
     }
 

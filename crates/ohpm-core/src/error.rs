@@ -316,6 +316,52 @@ impl OhpmError {
         )
     }
 
+    pub fn check_registry_failed(registry: &str) -> Self {
+        Self::new(
+            "CheckRegistryFailed",
+            format!("ohpm tool does not support this registry {registry}."),
+        )
+    }
+
+    pub fn file_lock_failed(path: &std::path::Path, detail: &str) -> Self {
+        Self::new(
+            "FileLockFailed",
+            format!("Failed to acquire the cross-process lock {}: {detail}", path.display()),
+        )
+    }
+
+    pub fn hook_fail(module: &std::path::Path, hook: &str, code: Option<i32>) -> Self {
+        Self::new(
+            "HookFail",
+            format!(
+                "The \"{hook}\" hook of {} failed{}.",
+                module.display(),
+                code.map(|c| format!(" with exit code {c}")).unwrap_or_default()
+            ),
+        )
+    }
+
+    pub fn conflict_resolve_failure(name: &str, version: &str) -> Self {
+        Self::new(
+            "ConflictResolveFailure",
+            format!("Unable to resolve the version conflict of \"{name}@{version}\""),
+        )
+    }
+
+    pub fn not_found_hsp_file_by_registry_tgz(name: &str, version: &str) -> Self {
+        Self::new(
+            "NotFoundHspFileByRegistryTgz",
+            format!("Cannot find .hsp file from hsp package \"{name}@{version}\""),
+        )
+    }
+
+    pub fn exclusions_conflict(dep_keys: &str) -> Self {
+        Self::new(
+            "ExclusionsConflict",
+            format!("The dependency modification keys conflict: {dep_keys}"),
+        )
+    }
+
     pub fn update_has_version(version: &str) -> Self {
         Self::new(
             "UpdateHasVersion",

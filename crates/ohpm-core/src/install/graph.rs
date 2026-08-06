@@ -3,7 +3,7 @@
 //! `lib/core/dependency/graph-builder/AsyncGraphBuilder.js` and
 //! `lib/concurrent/ConcurrentExecutor.js`.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
 use crate::error::{OhpmError, Result};
-use crate::install::node::{dep_node_version_compare, DepType, Node, NodeData};
+use crate::install::node::{DepType, Node, NodeData};
 use crate::install::spec::is_local_dependency;
 use crate::install::resolver::{with_network_retry, Resolver};
 use crate::install::spec::OhpaType;
@@ -26,16 +26,36 @@ pub struct DependencyGraph {
     /// The max-satisfying node per name (`_finalDepCache` / MaxVersionStrategy).
     final_dep_cache: HashMap<String, Arc<Node>>,
     max_satisfying_cache: HashMap<String, Arc<NodeData>>,
+    /// `_isResolveConflict` — with conflict resolution the graph is flattened
+    /// to the max-satisfying nodes (`pickNode` consults the final cache).
+    resolve_conflict: bool,
+    /// `resolve_conflict_strict` — the strict max-version strategy.
+    strict_mode: bool,
+    /// Strict-mode resolution failures (`addResolveFailedDepName`), shared
+    /// with the resolver.
+    resolve_failed: Arc<std::sync::Mutex<BTreeSet<String>>>,
+    /// The flattened node list (`finalDepList`, roots included).
+    flat: Vec<Arc<Node>>,
 }
 
 impl DependencyGraph {
-    pub fn new(project_root: PathBuf, roots: Vec<(PathBuf, Arc<Node>)>) -> Self {
+    pub fn new(
+        project_root: PathBuf,
+        roots: Vec<(PathBuf, Arc<Node>)>,
+        resolve_conflict: bool,
+        strict_mode: bool,
+        resolve_failed: Arc<std::sync::Mutex<BTreeSet<String>>>,
+    ) -> Self {
         DependencyGraph {
             project_root,
             roots,
             rough: HashMap::new(),
             final_dep_cache: HashMap::new(),
             max_satisfying_cache: HashMap::new(),
+            resolve_conflict,
+            strict_mode,
+            resolve_failed,
+            flat: Vec::new(),
         }
     }
 
@@ -45,8 +65,8 @@ impl DependencyGraph {
     }
 
     /// `registerNode` — add to the rough cache and update the max-satisfying
-    /// cache (`VersionConflictManager.isMaxSatisfying` with the default
-    /// `MaxVersionStrategy`).
+    /// cache (`VersionConflictManager.isMaxSatisfying`, strategy per the
+    /// `resolve_conflict_strict` config).
     pub fn register_node(&mut self, node: Arc<Node>) -> Result<()> {
         let name = node.data.name.clone();
         let fetch_spec = node.data.fetch_spec.clone();
@@ -63,29 +83,25 @@ impl DependencyGraph {
         if node.data.is_root {
             return Ok(());
         }
-        let is_max = match self.max_satisfying_cache.get(&name).cloned() {
-            None => true,
-            Some(prev) => {
-                if prev.unmet.is_some() {
-                    true
-                } else if node.data.unmet.is_some() {
-                    false
-                } else {
-                    // `MaxVersionStrategy.isMaxSatisfying` — registry nodes
-                    // must carry valid pinned/version semver.
-                    if (!is_local_dependency(&node.data.pinned_spec)
-                        && node_semver::Version::parse(&node.data.pinned_spec).is_err())
-                        || node_semver::Version::parse(&node.data.version).is_err()
-                    {
-                        return Err(OhpmError::dep_builder_invalid_dep_version(
-                            &node.data.version,
-                            &format!("{}@{}", node.data.name, node.data.pinned_spec),
-                        ));
-                    }
-                    dep_node_version_compare(&node.data, &prev) == std::cmp::Ordering::Greater
-                }
-            }
+        // `updateMaxSatisfyingVersionMap` — the strategy decides whether the
+        // node becomes the max-satisfying one of its name.
+        let strategy = if self.strict_mode {
+            crate::install::version_conflict::Strategy::Strict
+        } else {
+            crate::install::version_conflict::Strategy::Max
         };
+        let fetch_specs: BTreeSet<String> = self
+            .rough
+            .get(&name)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let is_max = crate::install::version_conflict::is_max_satisfying(
+            strategy,
+            &node.data,
+            self.max_satisfying_cache.get(&name).map(|n| n.as_ref()),
+            &fetch_specs,
+            &mut self.resolve_failed.lock().unwrap_or_else(|e| e.into_inner()),
+        )?;
         if is_max {
             self.final_dep_cache.insert(name.clone(), node.clone());
             self.max_satisfying_cache.insert(name, node.data.clone());
@@ -109,9 +125,38 @@ impl DependencyGraph {
         }
     }
 
-    /// `flatGraph` — all registered nodes (deduped by `name@fetchSpec`).
+    /// `flatGraph` — all registered nodes (deduped by `name@fetchSpec`); in
+    /// resolve-conflict mode the flattened max-satisfying list.
     pub fn flat_graph(&self) -> Vec<Arc<Node>> {
+        if self.resolve_conflict && !self.flat.is_empty() {
+            return self.flat.clone();
+        }
         self.rough.values().flat_map(|m| m.values()).cloned().collect()
+    }
+
+    /// `roughDepList` — all rough nodes (the conflict lockfile rewrite and
+    /// the alarms iterate these, like the reference).
+    pub fn rough_nodes(&self) -> Vec<Arc<Node>> {
+        self.rough.values().flat_map(|m| m.values()).cloned().collect()
+    }
+
+    /// `rebindGlobalMax` — replace the per-name final/max entries with the
+    /// resolver's global max-satisfying node (cross-module conflicts).
+    pub fn rebind_global_max(&mut self, name: &str, node: Arc<Node>) {
+        self.final_dep_cache.insert(name.to_string(), node.clone());
+        self.max_satisfying_cache.insert(name.to_string(), node.data.clone());
+    }
+
+    /// `flattenToResolved` — with conflict resolution the graph keeps only the
+    /// max-satisfying node per name (`finalDepList`): `pickNode` consults the
+    /// final cache and the install/symlink phases see only the resolved view.
+    pub fn flatten_to_resolved(&mut self) {
+        if !self.resolve_conflict {
+            return;
+        }
+        let mut flat: Vec<Arc<Node>> = self.roots.iter().map(|(_, r)| r.clone()).collect();
+        flat.extend(self.final_dep_cache.values().cloned());
+        self.flat = flat;
     }
 
     /// `pickMaxVersion` — the max-satisfying node for a name.
@@ -128,11 +173,21 @@ impl DependencyGraph {
     }
 
     /// `pickNode` — locate a requirement's node in the rough cache (the
-    /// symlink phase resolves each requirement edge back to its node).
+    /// symlink phase resolves each requirement edge back to its node); in
+    /// resolve-conflict mode the max-satisfying node of the name is returned.
     pub fn pick_node(&self, name: &str, spec: &str, parent: &Node) -> Result<Arc<Node>> {
         let where_dir = self.where_to_find_child_node(spec, parent);
         let parsed = crate::install::spec::parse_dependency(&format!("{name}@{spec}"), &where_dir)
             .map_err(|_| OhpmError::dep_node_not_found(name, spec))?;
+        if self.resolve_conflict {
+            return self.pick_max_version(name).or_else(|_| {
+                self.rough
+                    .get(name)
+                    .and_then(|m| m.get(&parsed.fetch_spec))
+                    .cloned()
+                    .ok_or_else(|| OhpmError::dep_node_not_found(name, spec))
+            });
+        }
         self.rough
             .get(name)
             .and_then(|m| m.get(&parsed.fetch_spec))
@@ -154,7 +209,8 @@ struct Task {
 
 /// `AsyncGraphBuilder.build` + `ConcurrentExecutor.runWithErrorHandle` —
 /// build the graph with `max_concurrent` workers over a shared queue, early
-/// stop on the first error.
+/// stop on the first error. With conflict resolution the graph is flattened
+/// to the max-satisfying nodes afterwards (`resolveConflictInAllGraphs`).
 pub async fn build_graphs(
     resolver: &Arc<Resolver>,
     roots: Vec<(PathBuf, Arc<Node>)>,
@@ -164,7 +220,13 @@ pub async fn build_graphs(
     project: Option<&crate::install::modules::ProjectBuildProfile>,
 ) -> Result<DependencyGraph> {
     let project_root = resolver.project_root.clone();
-    let graph = Arc::new(Mutex::new(DependencyGraph::new(project_root, roots.clone())));
+    let graph = Arc::new(Mutex::new(DependencyGraph::new(
+        project_root,
+        roots.clone(),
+        resolver.resolve_conflict,
+        resolver.strict_mode,
+        resolver.resolve_failed.clone(),
+    )));
     let queue: Arc<Mutex<VecDeque<Task>>> = Arc::new(Mutex::new(VecDeque::new()));
     let error_flag = Arc::new(AtomicBool::new(false));
     let first_error: Arc<Mutex<Option<OhpmError>>> = Arc::new(Mutex::new(None));
@@ -222,7 +284,34 @@ pub async fn build_graphs(
     if let Some(e) = error {
         return Err(e);
     }
-    let g = graph.lock().await;
+    let mut g = graph.lock().await;
+    if resolver.resolve_conflict {
+        // Cross-module conflicts: rebind each name to the global
+        // max-satisfying node (the reference's rebuild yields the same data).
+        let names: Vec<String> = g.final_dep_cache.keys().cloned().collect();
+        for name in names {
+            let Some(max_data) = resolver.max_satisfying_data(&name).await else {
+                continue;
+            };
+            let Some(cur) = g.final_dep_cache.get(&name).cloned() else {
+                continue;
+            };
+            if max_data.pinned_spec == cur.data.pinned_spec {
+                continue;
+            }
+            let rebound = Node::with_requirements_masked(
+                max_data.clone(),
+                cur.dep_type,
+                Some(max_data.dev_dependencies.clone()),
+                max_data.dynamic_dependencies.clone(),
+                max_data.dependencies.clone(),
+                project,
+                max_data.masked_by_override_dependency_map,
+            )?;
+            g.rebind_global_max(&name, Arc::new(rebound));
+        }
+    }
+    g.flatten_to_resolved();
     Ok((*g).clone())
 }
 
@@ -260,15 +349,29 @@ async fn run_task(
         }
     })
     .await?;
-    // `new DependencyNode(nodeData, depType)` — requirements from the node
-    // data's own dependency maps.
-    let node = Node::with_requirements(
+    // `new DependencyNode(nodeData, depType, overrideConfig)` — requirements
+    // from the overrideDepMap entry when the node is masked, else the node
+    // data's own maps (exclusions already applied during the node build).
+    let (dev, dynamic, prod) = match &node_data.masked_deps {
+        Some(m) => (
+            Some(m.dev_dependencies.clone()),
+            m.dynamic_dependencies.clone(),
+            m.dependencies.clone(),
+        ),
+        None => (
+            Some(node_data.dev_dependencies.clone()),
+            node_data.dynamic_dependencies.clone(),
+            node_data.dependencies.clone(),
+        ),
+    };
+    let node = Node::with_requirements_masked(
         node_data.clone(),
         task.dep_type,
-        Some(node_data.dev_dependencies.clone()),
-        node_data.dynamic_dependencies.clone(),
-        node_data.dependencies.clone(),
+        dev,
+        dynamic,
+        prod,
         project,
+        node_data.masked_by_override_dependency_map,
     )?;
     dfs(graph, queue, &task, Arc::new(node), task.cur_depth + 1).await
 }
@@ -354,6 +457,8 @@ mod tests {
             dev_dependencies: BTreeMap::new(),
             dynamic_dependencies: BTreeMap::new(),
             unmet: None,
+            masked_by_override_dependency_map: false,
+            masked_deps: None,
         })
     }
 
@@ -362,12 +467,13 @@ mod tests {
             data: node_data(name, version, pinned),
             dep_type: DepType::Prod,
             requirements: BTreeMap::new(),
+            masked_by_override_dependency_map: false,
         })
     }
 
     #[test]
     fn register_and_max_version() {
-        let mut g = DependencyGraph::new("/proj".into(), Vec::new());
+        let mut g = DependencyGraph::new("/proj".into(), Vec::new(), false, false, Arc::new(std::sync::Mutex::new(BTreeSet::new())));
         let low = node("foo", "1.0.0", "1.0.0");
         let high = node("foo", "2.0.0", "2.0.0");
         g.register_node(low.clone()).unwrap();
@@ -381,7 +487,7 @@ mod tests {
 
     #[test]
     fn invalid_dep_version_rejected() {
-        let mut g = DependencyGraph::new("/proj".into(), Vec::new());
+        let mut g = DependencyGraph::new("/proj".into(), Vec::new(), false, false, Arc::new(std::sync::Mutex::new(BTreeSet::new())));
         // The validation only runs when a node of the same name exists.
         g.register_node(node("foo", "1.0.0", "1.0.0")).unwrap();
         let bad = node("foo", "not-a-version", "latest");
@@ -401,8 +507,9 @@ mod tests {
             }),
             dep_type: DepType::Prod,
             requirements: BTreeMap::new(),
+            masked_by_override_dependency_map: false,
         };
-        let g = DependencyGraph::new("/proj".into(), vec![("/proj".into(), Arc::new(root.clone()))]);
+        let g = DependencyGraph::new("/proj".into(), vec![("/proj".into(), Arc::new(root.clone()))], false, false, Arc::new(std::sync::Mutex::new(BTreeSet::new())));
         // Local child of a linked root -> the source dir.
         assert_eq!(
             g.where_to_find_child_node("../lib", &root),

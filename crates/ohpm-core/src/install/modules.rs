@@ -13,6 +13,8 @@ pub struct ProjectBuildProfile {
     pub project_root: PathBuf,
     pub module_roots: Vec<PathBuf>,
     pub module_map: BTreeMap<String, PathBuf>,
+    /// `useOhmurl` — a product enables `buildOption.strictMode.useNormalizedOHMUrl`.
+    pub use_ohmurl: bool,
 }
 
 impl ProjectBuildProfile {
@@ -30,7 +32,52 @@ impl ProjectBuildProfile {
             ..Default::default()
         };
         pbp.load_module_roots(&json);
+        pbp.load_ohmurl_config(&json);
         Some(pbp)
+    }
+
+    /// `loadOHMUrlConfig` — `profileJson.app.products`, then per product walk
+    /// `buildOption.strictMode.useNormalizedOHMUrl` (truthy enables).
+    fn load_ohmurl_config(&mut self, json: &serde_json::Value) {
+        let Some(products) = json
+            .get("app")
+            .and_then(|a| a.get("products"))
+            .and_then(|p| p.as_array())
+        else {
+            return;
+        };
+        for product in products {
+            let mut v = product;
+            let mut found = true;
+            for key in ["buildOption", "strictMode", "useNormalizedOHMUrl"] {
+                match v.get(key) {
+                    Some(next) => v = next,
+                    None => {
+                        found = false;
+                        break;
+                    }
+                }
+            }
+            if found && Self::is_truthy(v) {
+                self.use_ohmurl = true;
+                break;
+            }
+        }
+    }
+
+    /// JS truthiness — `false`, `null`, `0`, `""` are falsy.
+    fn is_truthy(v: &serde_json::Value) -> bool {
+        match v {
+            serde_json::Value::Null => false,
+            serde_json::Value::Bool(b) => *b,
+            serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
+            serde_json::Value::String(s) => !s.is_empty(),
+            _ => true,
+        }
+    }
+
+    pub fn use_ohmurl(&self) -> bool {
+        self.use_ohmurl
     }
 
     pub fn get_module_roots(&self) -> &[PathBuf] {

@@ -54,6 +54,22 @@ A cargo workspace with two crates:
   `uninstall` drops the packages from the root requirements and rewrites the
   manifest.
 
+Version conflicts are resolved to the max-satisfying version by default
+(`resolveVersionConflict2LockFile` + the flattened graph view), the lockfile
+specifiers/packages are rewritten accordingly, and the strict strategy
+(`resolve_conflict_strict`) is implemented including the strict alarms; the
+local dependency-name inconsistency alarm (enforced by
+`enforce_dependency_key` / the build-profile `useNormalizedOHMUrl` config) and
+the registry name case-consistency alarm mirror `lib/core/alarm/`. The
+`overrides` / `overrideDependencyMap` / `exclusions` fields of
+`oh-package.json5` are applied during the graph build (mask + exclusion, the
+`maskedByOverrideDependencyMap` tag written to the lockfile and the install
+record), parameterized installs (`@param:` markers via `--parameter-file` or
+the manifest `parameterFile` field) substitute the project manifest, and
+target installs (`--target_path` + `dependencyMap.json5`) switch the module
+roots, the lockfile name (`oh-package-<target>-lock.json5`) and write the
+resolved module manifests into `<target>/resolve-conflict/<module>`.
+
 Protocol extensions beyond the reference (which rejects them), mirroring
 pnpm/pacquet:
 

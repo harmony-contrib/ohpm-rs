@@ -53,6 +53,8 @@ pub struct PackageEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integrity: Option<String>,
     pub store_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_path_hsp: Option<String>,
     pub dependencies: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub dev_dependencies: BTreeMap<String, String>,
@@ -68,7 +70,7 @@ pub struct PackageEntry {
 pub struct LockRecord {
     pub lock_version: String,
     pub settings: LockSettings,
-    pub overrides: BTreeMap<String, serde_json::Value>,
+    pub overrides: BTreeMap<String, String>,
     pub override_dependency_map: BTreeMap<String, serde_json::Value>,
     pub modules: BTreeMap<String, ModuleEntry>,
     pub packages: BTreeMap<String, PackageEntry>,
@@ -84,6 +86,8 @@ pub fn resolve(
     graphs: &[DependencyGraph],
     project_root: &Path,
     settings: &LockSettings,
+    overrides: Option<&crate::install::overrides::Overrides>,
+    exclusions: Option<&crate::install::exclusions::Exclusions>,
 ) -> LockRecord {
     let mut modules = BTreeMap::new();
     let mut packages = BTreeMap::new();
@@ -95,11 +99,45 @@ pub fn resolve(
         }
         fill_packages(&mut packages, graph, project_root);
     }
+    // `genOverrideDependencyMap` — the overrideDependencyMap entries, then
+    // the build-time exclusions final map (exclusions win key collisions).
+    let override_dep_map: BTreeMap<String, serde_json::Value> = overrides
+        .map(|o| {
+            o.override_dep_map
+                .get_entries()
+                .iter()
+                .map(|(k, e)| {
+                    let mut v = serde_json::Map::new();
+                    if !e.dependencies.is_empty() {
+                        v.insert("dependencies".into(), serde_json::to_value(&e.dependencies).unwrap());
+                    }
+                    if !e.dev_dependencies.is_empty() {
+                        v.insert("devDependencies".into(), serde_json::to_value(&e.dev_dependencies).unwrap());
+                    }
+                    if !e.dynamic_dependencies.is_empty() {
+                        v.insert("dynamicDependencies".into(), serde_json::to_value(&e.dynamic_dependencies).unwrap());
+                    }
+                    (k.clone(), serde_json::Value::Object(v))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut override_dependency_map = override_dep_map;
+    if let Some(ex) = exclusions {
+        for (key, eff) in ex.final_map() {
+            let mut v = serde_json::Map::new();
+            v.insert("dependencies".into(), serde_json::to_value(&eff.dependencies).unwrap());
+            v.insert("dynamicDependencies".into(), serde_json::to_value(&eff.dynamic_dependencies).unwrap());
+            override_dependency_map.insert(key.clone(), serde_json::Value::Object(v));
+        }
+    }
     LockRecord {
         lock_version: LOCK_VERSION.to_string(),
         settings: settings.clone(),
-        overrides: BTreeMap::new(),
-        override_dependency_map: BTreeMap::new(),
+        overrides: overrides
+            .map(|o| o.overrides_map.clone())
+            .unwrap_or_default(),
+        override_dependency_map,
         modules,
         packages,
     }
@@ -117,7 +155,7 @@ fn gen_module(
         dependencies: string_map_to_specver(root_node, graph, project_root, module_root, root_node.dependencies()),
         dev_dependencies: string_map_to_specver(root_node, graph, project_root, module_root, root_node.dev_dependencies()),
         dynamic_dependencies: string_map_to_specver(root_node, graph, project_root, module_root, root_node.dynamic_dependencies()),
-        masked_by_override_dependency_map: false,
+        masked_by_override_dependency_map: root_node.masked_by_override_dependency_map,
     }
 }
 
@@ -214,12 +252,13 @@ fn gen_package(node: &Node, graph: &DependencyGraph, project_root: &Path) -> Pac
     PackageEntry {
         integrity: node.data.integrity.clone(),
         store_path: relative_slash(project_root, &save_root),
+        store_path_hsp: None,
         dependencies: actual_dependency(node, graph, DepType::Prod, project_root),
         dev_dependencies: actual_dependency(node, graph, DepType::Dev, project_root),
         dynamic_dependencies: actual_dependency(node, graph, DepType::Dynamic, project_root),
         dev: node.dep_type == DepType::Dev,
         dynamic: node.dep_type == DepType::Dynamic,
-        masked_by_override_dependency_map: false,
+        masked_by_override_dependency_map: node.masked_by_override_dependency_map,
     }
 }
 

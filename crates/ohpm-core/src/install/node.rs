@@ -67,6 +67,22 @@ pub struct NodeData {
     pub dynamic_dependencies: BTreeMap<String, String>,
     /// Set when resolution failed; the graph build then rethrows the error.
     pub unmet: Option<OhpmError>,
+    /// The node's deps were modified by `exclusions` or
+    /// `overrideDependencyMap` (`maskedByOverrideDependencyMap` in the
+    /// lockfile packages and the install record).
+    pub masked_by_override_dependency_map: bool,
+    /// The `overrideDependencyMap` entry replacing the node's own maps
+    /// (post-exclusion). The node's requirements are built from these.
+    pub masked_deps: Option<MaskedDeps>,
+}
+
+/// The three dependency maps of an `overrideDependencyMap` entry (the mask
+/// replacement for a node's own maps).
+#[derive(Debug, Clone, Default)]
+pub struct MaskedDeps {
+    pub dependencies: BTreeMap<String, String>,
+    pub dev_dependencies: BTreeMap<String, String>,
+    pub dynamic_dependencies: BTreeMap<String, String>,
 }
 
 impl NodeData {
@@ -116,6 +132,8 @@ pub struct Node {
     /// requirement's type, deeper children inherit the parent's).
     pub dep_type: DepType,
     pub requirements: BTreeMap<String, Requirement>,
+    /// The node's deps were replaced by an overrideDependencyMap entry.
+    pub masked_by_override_dependency_map: bool,
 }
 
 impl Node {
@@ -132,6 +150,22 @@ impl Node {
         dynamic: BTreeMap<String, String>,
         prod: BTreeMap<String, String>,
         project: Option<&ProjectBuildProfile>,
+    ) -> Result<Node> {
+        Self::with_requirements_masked(data, dep_type, dev, dynamic, prod, project, false)
+    }
+
+    /// Like `with_requirements`, but with the override-dependency-map mask
+    /// semantics: when `masked` the three maps are REPLACED by the override
+    /// entry (missing keys become empty), and `maskedByOverrideDependencyMap`
+    /// is recorded.
+    pub fn with_requirements_masked(
+        data: Arc<NodeData>,
+        dep_type: DepType,
+        dev: Option<BTreeMap<String, String>>,
+        dynamic: BTreeMap<String, String>,
+        prod: BTreeMap<String, String>,
+        project: Option<&ProjectBuildProfile>,
+        masked: bool,
     ) -> Result<Node> {
         let include_dev = data.is_root || is_module_root(&data.pkg_store_dir, project);
         let mut requirements = BTreeMap::new();
@@ -162,6 +196,7 @@ impl Node {
             data,
             dep_type,
             requirements,
+            masked_by_override_dependency_map: masked,
         })
     }
 
@@ -317,6 +352,8 @@ mod tests {
             dev_dependencies: BTreeMap::new(),
             dynamic_dependencies: BTreeMap::new(),
             unmet: None,
+            masked_by_override_dependency_map: false,
+            masked_deps: None,
         })
     }
 

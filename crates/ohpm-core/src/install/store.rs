@@ -519,6 +519,8 @@ mod tests {
             dev_dependencies: Default::default(),
             dynamic_dependencies: Default::default(),
             unmet: None,
+            masked_by_override_dependency_map: false,
+            masked_deps: None,
         }
     }
 

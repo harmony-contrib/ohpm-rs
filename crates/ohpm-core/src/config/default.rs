@@ -30,10 +30,13 @@ pub mod types {
     pub const CRYPTO_PATH: &str = "crypto_path";
     pub const RESOLVE_CONFLICT: &str = "resolve_conflict";
     pub const RESOLVE_CONFLICT_STRICT: &str = "resolve_conflict_strict";
+    pub const ENFORCE_DEPENDENCY_KEY: &str = "enforce_dependency_key";
     pub const INSTALL_ALL: &str = "install_all";
     pub const ENABLE_UNIFIED_LOCKFILE: &str = "enable_unified_lockfile";
     pub const LOCKFILE_STABLE_ORDER: &str = "lockfile_stable_order";
     pub const ENABLE_LOCK_INNER_PKG_VERSION: &str = "enable_lock_inner_pkg_version";
+    pub const ENABLE_CROSS_PROCESS_LOCK: &str = "enable_cross_process_lock";
+    pub const PARAMETER_FILE: &str = "parameter_file";
 }
 
 /// Suffixes appended to a stripped registry URL for access tokens.
@@ -84,10 +87,13 @@ pub fn default_config() -> BTreeMap<String, ConfigValue> {
     m.insert(types::CRYPTO_PATH.to_string(), ConfigValue::String(String::new()));
     m.insert(types::RESOLVE_CONFLICT.to_string(), ConfigValue::Bool(true));
     m.insert(types::RESOLVE_CONFLICT_STRICT.to_string(), ConfigValue::Bool(false));
+    m.insert(types::ENFORCE_DEPENDENCY_KEY.to_string(), ConfigValue::Bool(false));
     m.insert(types::INSTALL_ALL.to_string(), ConfigValue::Bool(true));
     m.insert(types::ENABLE_UNIFIED_LOCKFILE.to_string(), ConfigValue::Bool(false));
     m.insert(types::LOCKFILE_STABLE_ORDER.to_string(), ConfigValue::Bool(false));
     m.insert(types::ENABLE_LOCK_INNER_PKG_VERSION.to_string(), ConfigValue::Bool(true));
+    m.insert(types::ENABLE_CROSS_PROCESS_LOCK.to_string(), ConfigValue::Bool(false));
+    m.insert(types::PARAMETER_FILE.to_string(), ConfigValue::String(String::new()));
     m
 }
 

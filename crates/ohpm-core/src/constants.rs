@@ -40,6 +40,16 @@ pub const ALIAS_PREFIX: &str = "ohpm:";
 /// The workspace protocol prefix (`workspace:<range>`), mirroring pnpm.
 pub const WORKSPACE_PREFIX: &str = "workspace:";
 
+/// The HSP hspType values (`HspType.js`).
+pub const HSP_TYPE_CROSS_APP: &str = "cross_app";
+
+/// The cross-process lock file name at the project root (`oh-lock.lock`).
+pub const LOCK_FILE_NAME: &str = "oh-lock.lock";
+
+/// 6.0.1 hard-coded registry white-list (`[""]` — no real URL matches, so the
+/// npm-registry check can never fire in production).
+pub const REGISTRY_WHITE_LIST: [&str; 1] = [""];
+
 /// Path/content compression for store-dir names (see `Constants.compressConfig`).
 pub mod compress {
     pub const PATH_LEN: usize = 44;

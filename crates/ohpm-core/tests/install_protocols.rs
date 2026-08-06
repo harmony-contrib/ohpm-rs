@@ -150,6 +150,7 @@ async fn ohpm_handler(
         let entry = serde_json::json!({
             "name": rest,
             "version": version,
+            "_ohpmVersion": "1",
             "dependencies": mv.deps,
             "dist": {
                 "tarball": format!("http://{addr}/ohpm/{rest}/-/{}-{version}.har", rest.replace('/', "-")),

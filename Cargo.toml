@@ -36,6 +36,7 @@ flate2 = "1"
 sha1 = "0.10"
 sha2 = "0.10"
 base64 = "0.22"
+filetime = "0.2"
 rsa = { version = "0.9", features = ["sha2", "pem", "pkcs5", "std"] }
 pkcs1 = "0.7"
 rand = "0.8"

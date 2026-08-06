@@ -176,6 +176,35 @@ pub fn is_standard_tag(tag: &str) -> bool {
     REGEX_TAG().is_match(tag) && tag != LATEST
 }
 
+/// `util/getVersionJudgedWithTagAndLocal.js` — the version key used by the
+/// overrideDependencyMap and exclusions lookups: `tag:xxx`/`latest` stay as
+/// the fetch spec, local deps resolve to their absolute path (slash-normalized
+/// when `slash_local`), everything else is the pinned spec.
+pub fn version_judged_with_tag_and_local(
+    fetch_spec: &str,
+    pinned_spec: &str,
+    slash_local: bool,
+) -> String {
+    let mut key = pinned_spec;
+    if is_standard_tag_dependency(fetch_spec) || fetch_spec == LATEST {
+        key = fetch_spec;
+    }
+    if is_local_dependency(key) {
+        let p = std::path::Path::new(key.trim_start_matches("file:"));
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(p)
+        };
+        let mut s = abs.to_string_lossy().into_owned();
+        if slash_local {
+            s = s.replace('\\', "/");
+        }
+        return s;
+    }
+    key.to_string()
+}
+
 /// `semver.validRange(spec, {loose: true, includePrerelease: true})` — the
 /// crate's `Range::parse` is strict, but accepts partials and a `v` prefix, so
 /// it covers the practical loose cases.

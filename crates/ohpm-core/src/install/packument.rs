@@ -57,6 +57,12 @@ pub struct VersionMeta {
     pub integrity: Option<String>,
     #[serde(default)]
     pub shasum: Option<String>,
+    #[serde(rename = "_ohpmVersion", default)]
+    pub ohpm_version: Option<String>,
+    #[serde(rename = "hspType", default)]
+    pub hsp_type: Option<String>,
+    #[serde(rename = "isDebugHsp", default)]
+    pub is_debug_hsp: Option<bool>,
     #[serde(default)]
     pub dist: Option<Dist>,
     /// Unknown fields round-trip.
@@ -93,11 +99,27 @@ pub struct Packument {
     pub is_from_lock_file: bool,
     /// The packument-level `packageType` (HSP marker).
     pub package_type: Option<String>,
+    /// The response `package-type` header (checkRegistry signal).
+    pub package_type_header: Option<String>,
 }
 
 impl Packument {
     pub fn version_keys(&self) -> Vec<String> {
         self.versions.keys().cloned().collect()
+    }
+
+    /// `checkRegistry` — reject a registry whose resolved version lacks the
+    /// `_ohpmVersion` marker when the `package-type` header is not "ohpm".
+    /// 6.0.1's white-list is `[""]`, so no real registry is whitelisted and
+    /// this can never pass in production — kept for reference parity.
+    pub fn check_registry(&self, meta: &VersionMeta, registry: &str, whitelist: &[String]) -> Result<()> {
+        if !whitelist.contains(&registry.to_string())
+            && meta.ohpm_version.is_none()
+            && self.package_type_header.as_deref() != Some("ohpm")
+        {
+            return Err(OhpmError::check_registry_failed(registry));
+        }
+        Ok(())
     }
 }
 
@@ -197,6 +219,19 @@ pub async fn fetch_packument(
                 || get_version_by_dist_tags(fetch_spec, &packument.dist_tags, &keys).is_some());
         if resolves {
             log::info!("fetch meta info of package '{name}' success: {registry}{name}");
+            // `checkRegistry` — the winning version's metadata must carry the
+            // ohpm marker (no-op in production: the white-list is [""]).
+            let pinned = semver_max_satisfying(&packument.version_keys(), fetch_spec)
+                .or_else(|| get_version_by_dist_tags(fetch_spec, &packument.dist_tags, &keys));
+            let whitelist: Vec<String> = crate::constants::REGISTRY_WHITE_LIST
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            if let Some(p) = pinned {
+                if let Some(meta) = packument.versions.get(&p) {
+                    packument.check_registry(meta, registry, &whitelist)?;
+                }
+            }
             return Ok((*packument).clone());
         }
         log::debug!(
@@ -246,7 +281,8 @@ async fn fetch_one(
         versions: raw.versions,
         registry_type: "ohpm".to_string(),
         is_from_lock_file: false,
-        package_type: raw.package_type.or(package_type_header),
+        package_type: raw.package_type.or(package_type_header.clone()),
+        package_type_header,
     }))
 }
 
@@ -346,6 +382,7 @@ mod tests {
             registry_type: "ohpm".to_string(),
             is_from_lock_file: false,
             package_type: raw.package_type,
+            package_type_header: None,
         };
         assert_eq!(p.actual_name, "@ohos/foo");
         assert_eq!(p.dist_tags["latest"], "1.2.3");

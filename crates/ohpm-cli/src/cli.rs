@@ -269,6 +269,13 @@ pub struct InstallArgs {
     /// contains oh-package.json5).
     #[arg(long)]
     pub prefix: Option<String>,
+    /// The parameter file path (parameterization).
+    #[arg(long = "parameter-file")]
+    pub parameter_file: Option<String>,
+    /// Install packages in the context of the specific target path
+    /// (dependencyMap.json5 targets).
+    #[arg(long = "target_path")]
+    pub target_path: Option<String>,
     /// Specify the registry.
     #[arg(long)]
     pub registry: Option<String>,

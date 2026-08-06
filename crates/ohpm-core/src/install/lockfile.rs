@@ -67,6 +67,14 @@ pub struct LockPkg {
     pub hsp_type: Option<String>,
     #[serde(rename = "isDebugHsp", skip_serializing_if = "Option::is_none")]
     pub is_debug_hsp: Option<bool>,
+    /// `addOrRemoveOverrideDependencyMapTag` — written only when the node's
+    /// deps were modified by `exclusions` / `overrideDependencyMap`.
+    #[serde(
+        rename = "maskedByOverrideDependencyMap",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub masked_by_override_dependency_map: Option<bool>,
     /// Unknown fields round-trip (HSP/debug fields of future versions).
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -272,6 +280,8 @@ pub struct Locker {
     pub lockfile: Lockfile,
     /// The lockfile existed before this install (even when not v3).
     pub was_present: bool,
+    /// The lockfile file name (`oh-package-lock.json5`, or the target variant).
+    lock_name: String,
     visited_spec_keys: HashSet<String>,
     visited_pkg_keys: HashSet<String>,
 }
@@ -284,7 +294,13 @@ impl Locker {
     /// (false in the non-unified mode); fresh lockers get the default shape
     /// (`stableOrder: true`).
     pub fn load(module_root: &Path) -> Locker {
-        let path = module_root.join(LOCK_JSON);
+        Self::load_with_lock_name(module_root, LOCK_JSON)
+    }
+
+    /// `getLockFileName` — target mode names the lockfile
+    /// `oh-package-<target>-lock.json5`.
+    pub fn load_with_lock_name(module_root: &Path, lock_name: &str) -> Locker {
+        let path = module_root.join(lock_name);
         let was_present = path.exists();
         let parsed = read_lockfile(&path);
         let mut lockfile = parsed.clone().unwrap_or_default();
@@ -298,6 +314,7 @@ impl Locker {
             module_root: module_root.to_path_buf(),
             lockfile,
             was_present,
+            lock_name: lock_name.to_string(),
             visited_spec_keys: HashSet::new(),
             visited_pkg_keys: HashSet::new(),
         }
@@ -349,6 +366,12 @@ impl Locker {
         self.lockfile.specifiers.remove(key);
     }
 
+    /// `deletePackage` — remove a `name@version` package entry (used by
+    /// `resolveVersionConflict2LockFile`).
+    pub fn delete_package(&mut self, key: &str) {
+        self.lockfile.packages.remove(key);
+    }
+
     /// `clearSpecifiers` — used on `--all`/update.
     pub fn clear_specifiers(&mut self) {
         self.lockfile.specifiers.clear();
@@ -364,6 +387,7 @@ impl Locker {
             lockfile,
             visited_spec_keys,
             visited_pkg_keys,
+            lock_name,
             ..
         } = self;
         // Specifiers: drop unvisited; collect the surviving values as the
@@ -379,7 +403,7 @@ impl Locker {
         lockfile
             .packages
             .retain(|key, _| visited_pkg_keys.contains(key));
-        let path = self.module_root.join(LOCK_JSON);
+        let path = self.module_root.join(lock_name);
         if !self.was_present && lockfile.packages.is_empty() {
             return Ok(());
         }
@@ -387,10 +411,14 @@ impl Locker {
     }
 }
 
-/// `getLockFileName.js` — the per-module lockfile name (target-mode variant
-/// deferred).
-pub fn lock_file_name(_module_root: &Path) -> &'static str {
-    LOCK_JSON
+/// `getLockFileName.js` — the per-module lockfile name (target mode changes
+/// it to `oh-package-<target>-lock.json5`).
+pub fn lock_file_name(target_name: &str) -> String {
+    if target_name.is_empty() {
+        LOCK_JSON.to_string()
+    } else {
+        format!("oh-package-{target_name}-lock.json5")
+    }
 }
 
 /// The lockfile's manifest requirement: a module root always has

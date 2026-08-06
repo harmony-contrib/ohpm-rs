@@ -43,6 +43,7 @@ pub fn get_root_node(
     module_root: &Path,
     link: bool,
     project: Option<&ProjectBuildProfile>,
+    parameter: Option<&crate::install::parameter::Parameterization>,
 ) -> Result<Node> {
     let path = module_root.join(MY_PACKAGE_JSON);
     if !path.exists() {
@@ -50,6 +51,25 @@ pub fn get_root_node(
     }
     let text = std::fs::read_to_string(&path)?;
     let mut manifest = Manifest::from_json5(&text)?;
+    // `ParameterParsingChainManager.handle` — substitute the `@param:` markers.
+    if let Some(parameter) = parameter {
+        let mut value = manifest.to_json();
+        parameter.parse_value(&manifest.name, &mut value)?;
+        let parsed: Manifest = serde_json::from_value(value)?;
+        manifest = parsed;
+    }
+    root_node_from_manifest(module_root, &manifest, link, project)
+}
+
+/// The shared root-node construction: manifest -> root `NodeData`
+/// (target mode passes the dependencyMap's cached manifest).
+pub fn root_node_from_manifest(
+    module_root: &Path,
+    manifest: &Manifest,
+    link: bool,
+    project: Option<&ProjectBuildProfile>,
+) -> Result<Node> {
+    let mut manifest = manifest.clone();
     let is_project_root = project.is_some_and(|p| &p.project_root == module_root);
     if is_project_root {
         manifest.name = String::new();
@@ -91,6 +111,7 @@ pub fn handle_cli_input(
     root: &mut Node,
     opts: &crate::install::InstallOptions,
     command: InstallCommand,
+    parameter: Option<&crate::install::parameter::Parameterization>,
 ) -> Result<Vec<String>> {
     let mut names = Vec::new();
     for raw in args {
@@ -106,6 +127,20 @@ pub fn handle_cli_input(
         };
         match command {
             InstallCommand::Install => {
+                // `canModify` — an existing entry whose value is parameterized
+                // cannot be rewritten by the CLI.
+                if root.requirements.contains_key(&name) {
+                    if let Some(p) = parameter {
+                        if !p.can_modify(&prefix.join(MY_PACKAGE_JSON), &name)? {
+                            return Err(OhpmError::new(
+                                "ParameterizationForbiddenInstallError",
+                                format!(
+                                    "The \"ohpm install {name}\" command cannot be executed when the \"parameterFile\" is configured."
+                                ),
+                            ));
+                        }
+                    }
+                }
                 if opts.save {
                     names.push(name.clone());
                     update_dependencies(root, &name, &parsed.raw_spec, opts);
@@ -129,6 +164,16 @@ pub fn handle_cli_input(
             }
             InstallCommand::Uninstall => {
                 if root.requirements.contains_key(&name) {
+                    if let Some(p) = parameter {
+                        if !p.can_modify(&prefix.join(MY_PACKAGE_JSON), &name)? {
+                            return Err(OhpmError::new(
+                                "ParameterizationForbiddenUninstallError",
+                                format!(
+                                    "The \"uninstall\" command cannot be executed when the \"parameterFile\" is configured."
+                                ),
+                            ));
+                        }
+                    }
                     root.requirements.remove(&name);
                 } else {
                     log::warn!(
@@ -322,7 +367,7 @@ mod tests {
     fn root_node_from_manifest() {
         let dir = tempfile::TempDir::new().unwrap();
         write_manifest(dir.path(), "{ \"foo\": \"^1.0.0\" }", "{ \"bar\": \"2.0.0\" }", "{}");
-        let root = get_root_node(dir.path(), true, None).unwrap();
+        let root = get_root_node(dir.path(), true, None, None).unwrap();
         assert_eq!(root.data.name, "entry");
         assert_eq!(root.data.version, "1.0.0");
         assert!(root.data.is_root);
@@ -342,7 +387,7 @@ mod tests {
         )
         .unwrap();
         let project = ProjectBuildProfile::load(dir.path()).unwrap();
-        let root = get_root_node(dir.path(), true, Some(&project)).unwrap();
+        let root = get_root_node(dir.path(), true, Some(&project), None).unwrap();
         assert_eq!(root.data.name, "");
         assert_eq!(root.data.version, "");
     }
@@ -351,32 +396,32 @@ mod tests {
     fn cli_input_handling() {
         let dir = tempfile::TempDir::new().unwrap();
         write_manifest(dir.path(), "{}", "{}", "{}");
-        let mut root = get_root_node(dir.path(), true, None).unwrap();
+        let mut root = get_root_node(dir.path(), true, None, None).unwrap();
         let opts = InstallOptions {
             save: true,
             save_dev: true,
             ..Default::default()
         };
-        let names = handle_cli_input(dir.path(), &["foo@^2.0.0".to_string()], &mut root, &opts, InstallCommand::Install).unwrap();
+        let names = handle_cli_input(dir.path(), &["foo@^2.0.0".to_string()], &mut root, &opts, InstallCommand::Install, None).unwrap();
         assert_eq!(names, vec!["foo"]);
         assert_eq!(root.requirements["foo"].spec, "^2.0.0");
         assert_eq!(root.requirements["foo"].dep_type, DepType::Dev);
 
         // --no-save uses the fetch spec and no cli names.
-        let mut root = get_root_node(dir.path(), true, None).unwrap();
+        let mut root = get_root_node(dir.path(), true, None, None).unwrap();
         let opts = InstallOptions {
             save: false,
             ..Default::default()
         };
-        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts, InstallCommand::Install).unwrap();
+        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts, InstallCommand::Install, None).unwrap();
         assert!(names.is_empty());
         assert_eq!(root.requirements["foo"].spec, "latest");
         assert_eq!(root.requirements["foo"].dep_type, DepType::NoSave);
 
         // Bare name with save: requirement spec is empty (parses as latest).
-        let mut root = get_root_node(dir.path(), true, None).unwrap();
+        let mut root = get_root_node(dir.path(), true, None, None).unwrap();
         let opts = InstallOptions::default();
-        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts, InstallCommand::Install).unwrap();
+        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts, InstallCommand::Install, None).unwrap();
         assert_eq!(names, vec!["foo"]);
         assert_eq!(root.requirements["foo"].spec, "");
     }
@@ -385,9 +430,9 @@ mod tests {
     fn update_pkg_json_rewrites() {
         let dir = tempfile::TempDir::new().unwrap();
         write_manifest(dir.path(), "{}", "{}", "{}");
-        let mut root = get_root_node(dir.path(), true, None).unwrap();
+        let mut root = get_root_node(dir.path(), true, None, None).unwrap();
         let opts = InstallOptions::default();
-        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts, InstallCommand::Install).unwrap();
+        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts, InstallCommand::Install, None).unwrap();
         // Resolve the requirement spec like updateCommandLineInputDependencies.
         root.requirements.insert(
             "foo".to_string(),
@@ -413,8 +458,8 @@ mod tests {
             "{ name: \"x\", version: \"${VERSION}\" }\n",
         )
         .unwrap();
-        let mut root2 = get_root_node(&param, true, None).unwrap();
-        let names2 = handle_cli_input(&param, &["foo".to_string()], &mut root2, &opts, InstallCommand::Install).unwrap();
+        let mut root2 = get_root_node(&param, true, None, None).unwrap();
+        let names2 = handle_cli_input(&param, &["foo".to_string()], &mut root2, &opts, InstallCommand::Install, None).unwrap();
         root2.requirements.insert(
             "foo".to_string(),
             Requirement {
