@@ -82,12 +82,16 @@ pub fn need_resolve_conflict(config: &crate::config::Config) -> bool {
 }
 
 /// `DependencyLockResolver.resolve` — build the record from the graphs.
+/// `unified` carries the unified-lockfile mode and `depended` the module-root
+/// depended counts (`fillPackages` skips roots nobody depends on).
 pub fn resolve(
     graphs: &[DependencyGraph],
     project_root: &Path,
     settings: &LockSettings,
     overrides: Option<&crate::install::overrides::Overrides>,
     exclusions: Option<&crate::install::exclusions::Exclusions>,
+    unified: bool,
+    depended: &std::collections::HashMap<String, usize>,
 ) -> LockRecord {
     let mut modules = BTreeMap::new();
     let mut packages = BTreeMap::new();
@@ -97,7 +101,7 @@ pub fn resolve(
             let key = if key.is_empty() { ".".to_string() } else { key };
             modules.insert(key, gen_module(root_node, graph, project_root, module_root));
         }
-        fill_packages(&mut packages, graph, project_root);
+        fill_packages(&mut packages, graph, project_root, unified, depended);
     }
     // `genOverrideDependencyMap` — the overrideDependencyMap entries, then
     // the build-time exclusions final map (exclusions win key collisions).
@@ -223,16 +227,30 @@ fn get_actual_spec(name: &str, pinned_spec: &str, version: &str, registry_type: 
     }
 }
 
-/// `fillPackages` — the package entries (roots excluded).
+/// `fillPackages` — the package entries (roots excluded; unified mode skips
+/// module-root nodes nobody depends on).
 fn fill_packages(
     packages: &mut BTreeMap<String, PackageEntry>,
     graph: &DependencyGraph,
     project_root: &Path,
+    unified: bool,
+    depended: &std::collections::HashMap<String, usize>,
 ) {
     for node in graph.flat_graph() {
-        if node.data.is_root || node.data.registry_type == "workspace" {
+        if node.data.registry_type == "workspace" {
             // Workspace members never appear in the packages map (pnpm parity).
             continue;
+        }
+        if node.data.is_root {
+            // Unified mode keeps module-root nodes somebody depends on
+            // (`fillPackages`); non-unified installs never record roots.
+            let depended_num = depended
+                .get(&format!("{}@{}", node.data.name, node.data.pinned_spec))
+                .copied()
+                .unwrap_or(0);
+            if !unified || depended_num == 0 {
+                continue;
+            }
         }
         let key = format!(
             "{}@{}",
@@ -246,9 +264,14 @@ fn fill_packages(
     }
 }
 
-/// `genPackage` — the package entry.
+/// `genPackage` — the package entry (included module-root nodes use their
+/// own directory as the store-path base, like the reference's `o`).
 fn gen_package(node: &Node, graph: &DependencyGraph, project_root: &Path) -> PackageEntry {
-    let save_root = node.data.resolve_save_root(project_root);
+    let save_root = if node.data.is_root {
+        PathBuf::from(&node.data.pinned_spec)
+    } else {
+        node.data.resolve_save_root(project_root)
+    };
     PackageEntry {
         integrity: node.data.integrity.clone(),
         store_path: relative_slash(project_root, &save_root),

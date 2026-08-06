@@ -983,3 +983,84 @@ async fn target_install_uses_dependency_map() {
     let snapshot: Value = json5::from_str(&snapshot).unwrap();
     assert_eq!(snapshot["dependencies"]["@ohos/foo"], "1.2.3");
 }
+
+#[tokio::test]
+async fn unified_lockfile_merges_modules() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let (registry, _tarballs) = sample_registry(work.path());
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
+
+    // A project with two modules: entry (foo, prod) and lib1 (foo, dev —
+    // the propagated type must be prod) plus a module-root dep entry.
+    let prefix = work.path().join("proj");
+    std::fs::create_dir_all(prefix.join("entry")).unwrap();
+    std::fs::create_dir_all(prefix.join("lib1")).unwrap();
+    std::fs::write(
+        prefix.join("build-profile.json5"),
+        "{ app: { products: [] }, modules: [{ name: \"entry\", srcPath: \"./entry\" }, { name: \"lib1\", srcPath: \"./lib1\" }] }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        prefix.join("entry/oh-package.json5"),
+        "{ name: \"entry\", version: \"1.0.0\", dependencies: { \"@ohos/foo\": \"^1.2.0\" } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        prefix.join("oh-package.json5"),
+        "{ name: \"proj\", version: \"1.0.0\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        prefix.join("lib1/oh-package.json5"),
+        "{ name: \"lib1\", version: \"1.0.0\", devDependencies: { \"@ohos/foo\": \"^1.2.0\" }, dependencies: { \"entry\": \"../entry\" } }\n",
+    )
+    .unwrap();
+    // Enable the unified lockfile via the project .ohpmrc.
+    std::fs::write(prefix.join(".ohpmrc"), "enable_unified_lockfile=true\n").unwrap();
+
+    // Load the config with the prefix as cwd so the project .ohpmrc applies.
+    std::env::set_var("HOME", home.path());
+    std::env::set_var("OHPM_REGISTRY", &addr);
+    std::env::set_var("OHPM_CACHE", cache.path());
+    std::env::set_var("OHPM_LOG_LEVEL", "error");
+    let mut cfg = Config::new();
+    cfg.load(&prefix, None).unwrap();
+    let client = RegistryClient::from_config(&cfg).unwrap();
+
+    let opts = InstallOptions { all: true, ..Default::default() };
+    let outcome = install(&client, &cfg, &prefix, &[], &opts).await.unwrap();
+    assert_eq!(outcome.module_roots.len(), 3, "project root + entry + lib1");
+
+    // ONE lockfile at the project root with the unified meta flag; the module
+    // directories carry none.
+    let lock: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lock["meta"]["enableUnifiedLockfile"], true);
+    assert!(!prefix.join("entry/oh-package-lock.json5").exists());
+    assert!(!prefix.join("lib1/oh-package-lock.json5").exists());
+    let specifiers = lock["specifiers"].as_object().unwrap();
+    assert_eq!(specifiers["@ohos/foo@^1.2.0"], "@ohos/foo@1.2.3");
+    // Unified mode relativizes local deps against the PROJECT root.
+    assert!(specifiers.contains_key("entry@entry"), "module-root dep key: {:?}", specifiers.keys());
+
+    // The record: lib1's foo lands in `dependencies` (the propagated prod
+    // type beats the dev declaration), and the depended entry root appears in
+    // packages with its own directory as the store path.
+    let record: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh_modules/.ohpm/lock.json5")).unwrap(),
+    )
+    .unwrap();
+    let lib1 = &record["modules"]["lib1"];
+    assert_eq!(lib1["dependencies"]["@ohos/foo"]["version"], "1.2.3");
+    assert!(lib1["devDependencies"].as_object().is_none_or(|m| !m.contains_key("@ohos/foo")));
+    let entry_pkg = &record["packages"]["entry@file:entry"];
+    assert!(entry_pkg.is_object(), "depended module root recorded: {:?}", record["packages"]);
+    assert_eq!(entry_pkg["storePath"], "entry");
+}

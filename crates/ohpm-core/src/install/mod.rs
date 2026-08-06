@@ -263,6 +263,12 @@ async fn run_pipeline(
     let workspace = crate::workspace::Workspace::find(prefix)?;
     // `validParameterFileConfig` — parameterization (None when not configured).
     let parameter = parameter::Parameterization::setup(config, &project_root, opts.parameter_file.as_deref())?;
+    // `shouldUseUnifiedLockfile` — `enable_unified_lockfile && install_all`.
+    let unified = config.get_bool(types::ENABLE_UNIFIED_LOCKFILE) && install_all;
+    let module_root_set: std::collections::BTreeSet<PathBuf> = module_roots
+        .iter()
+        .cloned()
+        .collect();
     let resolver = Arc::new(resolver::Resolver::new(
         client.clone(),
         config.clone(),
@@ -270,6 +276,8 @@ async fn run_pipeline(
         workspace,
         parameter.as_ref(),
         &lock_name,
+        unified,
+        module_root_set,
     )?);
     let mut roots: Vec<(PathBuf, Arc<node::Node>)> = Vec::new();
     let mut cli_input_names = Vec::new();
@@ -302,6 +310,44 @@ async fn run_pipeline(
     // 2b. update: delete the matching lockfile specifiers (or clear them).
     if command == InstallCommand::Update {
         update_delete_specifiers(&resolver, &roots, &module_roots, prefix, args, opts).await;
+    }
+
+    // 2c. unified mode: dep-type propagation across the module roots
+    // (`installProject`'s `setByDepTypeOrder` — dynamic > prod > dev wins).
+    if unified {
+        let order = |t: node::DepType| match t {
+            node::DepType::Dynamic => 2,
+            node::DepType::Prod => 1,
+            _ => 0,
+        };
+        let mut best: std::collections::BTreeMap<String, node::DepType> = std::collections::BTreeMap::new();
+        for (_, root) in &roots {
+            for (name, req) in &root.requirements {
+                if req.dep_type == node::DepType::NoSave {
+                    continue;
+                }
+                match best.get(name) {
+                    None => {
+                        best.insert(name.clone(), req.dep_type);
+                    }
+                    Some(prev) => {
+                        if order(req.dep_type) > order(*prev) {
+                            best.insert(name.clone(), req.dep_type);
+                        }
+                    }
+                }
+            }
+        }
+        for (_, root) in roots.iter_mut() {
+            let root_mut = Arc::make_mut(root);
+            for (name, req) in root_mut.requirements.iter_mut() {
+                if req.dep_type != node::DepType::NoSave {
+                    if let Some(t) = best.get(name) {
+                        req.dep_type = *t;
+                    }
+                }
+            }
+        }
     }
 
     // 3. graph build — one graph per module root (mirrors installMultiModules).
@@ -407,6 +453,8 @@ async fn run_pipeline(
         &settings,
         resolver.overrides.as_ref(),
         resolver.exclusions.lock().await.as_ref(),
+        unified,
+        &*resolver.unified_module_depended.lock().await,
     );
     lock_record::write_lock_record(&project_root, &record)?;
 

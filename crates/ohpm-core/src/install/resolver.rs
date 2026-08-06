@@ -60,6 +60,12 @@ pub struct Resolver {
     pub max_local: Mutex<HashMap<String, Arc<NodeData>>>,
     /// The lockfile file name (`getLockFileName` — target mode changes it).
     pub lock_name: String,
+    /// `shouldUseUnifiedLockfile` — one project-root locker (`installProject`).
+    pub unified: bool,
+    /// The build-profile module roots (unified-mode module-node accounting).
+    pub module_roots: std::collections::BTreeSet<PathBuf>,
+    /// `_unifiedModuleDependedNumMap` — dedupe key -> depended count.
+    pub unified_module_depended: Mutex<HashMap<String, usize>>,
     lockers: Mutex<HashMap<PathBuf, Locker>>,
     de_dupe_cache: Mutex<HashMap<String, Arc<NodeData>>>,
     in_flight: Mutex<HashMap<String, Arc<InFlight>>>,
@@ -93,6 +99,8 @@ impl Resolver {
         workspace: Option<crate::workspace::Workspace>,
         parameter: Option<&crate::install::parameter::Parameterization>,
         lock_name: &str,
+        unified: bool,
+        module_roots: std::collections::BTreeSet<PathBuf>,
     ) -> Result<Self> {
         let mtime_cache = Mutex::new(crate::install::mtime::MtimeCache::load(&project_root));
         // The manifest view — parameterized when a parameter file is
@@ -149,6 +157,9 @@ impl Resolver {
             max_satisfying: Mutex::new(HashMap::new()),
             max_local: Mutex::new(HashMap::new()),
             lock_name: lock_name.to_string(),
+            unified,
+            module_roots,
+            unified_module_depended: Mutex::new(HashMap::new()),
             lockers: Mutex::new(HashMap::new()),
             de_dupe_cache: Mutex::new(HashMap::new()),
             in_flight: Mutex::new(HashMap::new()),
@@ -163,13 +174,17 @@ impl Resolver {
         if node.is_root {
             return Ok(());
         }
-        self.versions
-            .lock()
-            .await
-            .entry(node.name.clone())
-            .or_default()
-            .insert(node.pinned_spec.clone());
-        {
+        // `needIgnoreCollectModuleNodeInUnifiedMode` — unified mode skips the
+        // version/fetch-spec collection for build-profile module roots (the
+        // max-satisfying selection still runs).
+        let ignore = self.ignore_module_node(&node.pinned_spec);
+        if !ignore {
+            self.versions
+                .lock()
+                .await
+                .entry(node.name.clone())
+                .or_default()
+                .insert(node.pinned_spec.clone());
             let mut fs = self.fetch_specs.lock().await;
             let entry = fs.entry(node.name.clone()).or_default();
             entry.insert(
@@ -183,6 +198,34 @@ impl Resolver {
         // Strict mode skips names that already failed resolution.
         if self.resolve_failed.lock().unwrap_or_else(|e| e.into_inner()).contains(&node.name) {
             return Ok(());
+        }
+        // Unified mode: a max that is a module root nobody depends on is
+        // replaced directly (`updateMaxSatisfyingVersion`'s unified guard).
+        if self.unified {
+            let current = self.max_satisfying.lock().await.get(&node.name).cloned();
+            let replace = match current {
+                Some(cur)
+                    if cur.is_root
+                        && self
+                            .unified_module_depended
+                            .lock()
+                            .await
+                            .get(&format!("{}@{}", cur.name, cur.pinned_spec))
+                            .copied()
+                            .unwrap_or(0)
+                            == 0 =>
+                {
+                    true
+                }
+                _ => false,
+            };
+            if replace {
+                self.max_satisfying
+                    .lock()
+                    .await
+                    .insert(node.name.clone(), std::sync::Arc::new(node.clone()));
+                return Ok(());
+            }
         }
         let strategy = if self.strict_mode {
             crate::install::version_conflict::Strategy::Strict
@@ -264,23 +307,72 @@ impl Resolver {
         .await;
     }
 
+    /// `needIgnoreCollectModuleNodeInUnifiedMode` — unified mode skips the
+    /// version/fetch-spec collection for build-profile module roots.
+    fn ignore_module_node(&self, pinned_spec: &str) -> bool {
+        self.unified && self.module_roots.contains(Path::new(pinned_spec))
+    }
+
+    /// `changeDependedNumOfModule` — unified mode counts how often a
+    /// build-profile module-root node is requested.
+    pub async fn change_depended_num_of_module(&self, node: &NodeData) {
+        if !self.unified || !self.module_roots.contains(Path::new(&node.pinned_spec)) {
+            return;
+        }
+        let key = format!("{}@{}", node.name, node.pinned_spec);
+        *self
+            .unified_module_depended
+            .lock()
+            .await
+            .entry(key)
+            .or_default() += 1;
+    }
+
+    /// `relativeSpec` / `getModuleLocker` — unified mode routes every lockfile
+    /// operation to the project root.
+    pub fn lock_root<'a>(&'a self, module_root: &'a Path) -> &'a Path {
+        if self.unified {
+            self.project_root.as_path()
+        } else {
+            module_root
+        }
+    }
+
     /// `syncLoadLockers` — eagerly load the lockers for the module roots so an
     /// empty graph still flushes (update/uninstall with no remaining deps).
+    /// Unified mode creates the single project-root locker (with the
+    /// per-module lockfile merge).
     pub async fn ensure_lockers(&self, roots: &[PathBuf]) {
         let mut lockers = self.lockers.lock().await;
         for root in roots {
-            lockers.entry(root.clone()).or_insert_with(|| {
-                Locker::load_with_lock_name(root, &self.lock_name)
+            let root = self.lock_root(root);
+            lockers.entry(root.to_path_buf()).or_insert_with(|| {
+                if self.unified {
+                    crate::install::lockfile::load_unified_lockfile(
+                        root,
+                        roots,
+                        &self.lock_name,
+                    )
+                } else {
+                    Locker::load_with_lock_name(root, &self.lock_name)
+                }
             });
         }
     }
 
-    /// Run `f` with the (mutable) locker for `root_dir`.
+    /// Run `f` with the (mutable) locker for `root_dir` (the unified locker in
+    /// unified mode).
     pub async fn with_locker<T>(&self, root_dir: &Path, f: impl FnOnce(&mut Locker) -> T) -> T {
+        let root = self.lock_root(root_dir).to_path_buf();
         let mut lockers = self.lockers.lock().await;
-        let locker = lockers
-            .entry(root_dir.to_path_buf())
-            .or_insert_with(|| Locker::load_with_lock_name(root_dir, &self.lock_name));
+        let locker = lockers.entry(root.clone()).or_insert_with(|| {
+            if self.unified {
+                let roots: Vec<PathBuf> = self.module_roots.iter().cloned().collect();
+                crate::install::lockfile::load_unified_lockfile(&root, &roots, &self.lock_name)
+            } else {
+                Locker::load_with_lock_name(&root, &self.lock_name)
+            }
+        });
         f(locker)
     }
 
@@ -322,6 +414,9 @@ impl Resolver {
                 Ok(node)
             })
             .await?;
+        // `tryGetNodeDataFromCache` + `buildNodeDataAsync` — the depended
+        // count increments on every request (cached included).
+        self.change_depended_num_of_module(&node).await;
         self.save_in_target_lock_file(&root_dir, &parsed, &node).await;
         Ok(node)
     }
@@ -361,12 +456,12 @@ impl Resolver {
             } else {
                 node.data.save_spec.clone()
             };
-            let rel_spec = relative_spec(module_root, &spec);
+            let rel_spec = relative_spec(self.lock_root(module_root), &spec);
             let locked = self
                 .with_locker(module_root, |locker| locker.get_lock_spec(&node.data.name, &rel_spec))
                 .await;
             if let Some(old_value) = locked {
-                let rel_max = relative_spec(module_root, &max.pinned_spec);
+                let rel_max = relative_spec(self.lock_root(module_root), &max.pinned_spec);
                 self.with_locker(module_root, |locker| {
                     locker.delete_package(&old_value);
                     locker.update_lock_spec_named(
@@ -567,7 +662,7 @@ impl Resolver {
         }
         let lock_value = self
             .with_locker(root_dir, |locker| {
-                locker.get_lock_spec(name, &relative_spec(root_dir, &original.fetch_spec))
+                locker.get_lock_spec(name, &relative_spec(self.lock_root(root_dir), &original.fetch_spec))
             })
             .await;
         if let Some(value) = &lock_value {
@@ -601,7 +696,7 @@ impl Resolver {
                     self.with_locker(root_dir, |locker| {
                         locker.delete_specifier(&format!(
                             "{name}@{}",
-                            relative_spec(root_dir, &original.fetch_spec)
+                            relative_spec(self.lock_root(root_dir), &original.fetch_spec)
                         ));
                     })
                     .await;
@@ -721,7 +816,7 @@ impl Resolver {
         // The lockfile may already pin the commit (re-install, no ls-remote).
         let locked = self
             .with_locker(root_dir, |locker| {
-                locker.get_lock_spec(name, &relative_spec(root_dir, &spec))
+                locker.get_lock_spec(name, &relative_spec(self.lock_root(root_dir), &spec))
             })
             .await;
         let (commit, manifest) = match locked {
@@ -811,7 +906,7 @@ impl Resolver {
             OhpaType::Range | OhpaType::Version | OhpaType::Tag | OhpaType::Alias => {
                 let Some((value, mut lock_pkg)) = self
                     .with_locker(root_dir, |locker| {
-                        locker.get_lock_pkg(name, &relative_spec(root_dir, fetch_spec))
+                        locker.get_lock_pkg(name, &relative_spec(self.lock_root(root_dir), fetch_spec))
                     })
                     .await
                 else {
@@ -845,7 +940,7 @@ impl Resolver {
             OhpaType::Git => {
                 let Some((value, _lock_pkg)) = self
                     .with_locker(root_dir, |locker| {
-                        locker.get_lock_pkg(name, &relative_spec(root_dir, fetch_spec))
+                        locker.get_lock_pkg(name, &relative_spec(self.lock_root(root_dir), fetch_spec))
                     })
                     .await
                 else {
@@ -894,7 +989,7 @@ impl Resolver {
                 // cached value (the content hash is then trusted).
                 let Some((value, lock_pkg)) = self
                     .with_locker(root_dir, |locker| {
-                        locker.get_lock_pkg(name, &relative_spec(root_dir, fetch_spec))
+                        locker.get_lock_pkg(name, &relative_spec(self.lock_root(root_dir), fetch_spec))
                     })
                     .await
                 else {
@@ -1191,7 +1286,7 @@ impl Resolver {
                 locker.delete_specifier(&format!(
                     "{}@{}",
                     parsed.name,
-                    relative_spec(root_dir, &parsed.fetch_spec)
+                    relative_spec(self.lock_root(root_dir), &parsed.fetch_spec)
                 ));
             })
             .await;
@@ -1220,46 +1315,48 @@ impl Resolver {
             self.with_locker(root_dir, |locker| {
                 locker.delete_specifier(&format!(
                     "{key_name}@{}",
-                    relative_spec(root_dir, &node.fetch_spec)
+                    relative_spec(self.lock_root(root_dir), &node.fetch_spec)
                 ));
             })
             .await;
             if node_semver::Version::parse(override_spec).is_ok() {
+                let lock_root = self.lock_root(root_dir).to_path_buf();
                 let mut lockers = self.lockers.lock().await;
                 let locker = lockers
-                    .entry(root_dir.to_path_buf())
-                    .or_insert_with(|| Locker::load_with_lock_name(root_dir, &self.lock_name));
+                    .entry(lock_root.clone())
+                    .or_insert_with(|| Locker::load_with_lock_name(&lock_root, &self.lock_name));
                 locker.update_lock_spec_named(
                     key_name,
                     &node.name,
-                    &relative_spec(root_dir, override_spec),
+                    &relative_spec(self.lock_root(root_dir), override_spec),
                     override_spec,
                 );
                 if node.registry_type != "workspace" {
                     locker.update_lock_pkg(
                         &node.name,
-                        &relative_spec(root_dir, override_spec),
+                        &relative_spec(self.lock_root(root_dir), override_spec),
                         LockPkg::from_node_data(node),
                     );
                 }
                 return;
             }
         }
+        let lock_root = self.lock_root(root_dir).to_path_buf();
         let mut lockers = self.lockers.lock().await;
         let locker = lockers
-            .entry(root_dir.to_path_buf())
-            .or_insert_with(|| Locker::load_with_lock_name(root_dir, &self.lock_name));
+            .entry(lock_root.clone())
+            .or_insert_with(|| Locker::load_with_lock_name(&lock_root, &self.lock_name));
         locker.update_lock_spec_named(
             key_name,
             &node.name,
-            &relative_spec(root_dir, &spec),
-            &relative_spec(root_dir, &node.pinned_spec),
+            &relative_spec(self.lock_root(root_dir), &spec),
+            &relative_spec(self.lock_root(root_dir), &node.pinned_spec),
         );
         // Workspace members never appear in the packages map (pnpm parity).
         if node.registry_type != "workspace" {
             locker.update_lock_pkg(
                 &node.name,
-                &relative_spec(root_dir, &node.pinned_spec),
+                &relative_spec(self.lock_root(root_dir), &node.pinned_spec),
                 LockPkg::from_node_data(node),
             );
         }

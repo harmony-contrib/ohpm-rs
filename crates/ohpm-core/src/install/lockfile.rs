@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use crate::constants::{LOCK_JSON, LATEST, MY_PACKAGE_JSON};
 use crate::error::{OhpmError, Result};
-use crate::install::spec::{is_local_dependency, is_protocol_spec, parse_inner};
+use crate::install::spec::{is_local_dependency, is_protocol_spec, parse_dependency, parse_inner, OhpaType};
 
 /// `LockFile.defaultLockJson.ATTENTION`.
 pub const LOCKFILE_ATTENTION: &str =
@@ -141,6 +141,99 @@ pub fn read_lockfile(path: &Path) -> Option<Lockfile> {
         }
     }
     Some(lf)
+}
+
+/// `PackageLockerManager.createUnifiedPkgLocker` — the project-root locker
+/// for unified-lockfile mode: an existing unified lockfile is adopted
+/// (`mergeLockJson`), the per-module lockfiles are merged otherwise
+/// (`mergeUntiedLockJson`).
+pub fn load_unified_lockfile(
+    project_root: &Path,
+    module_roots: &[PathBuf],
+    lock_name: &str,
+) -> Locker {
+    let mut locker = Locker::load_with_lock_name(project_root, lock_name);
+    locker.lockfile.meta_enable_unified_lockfile = Some(true);
+    match read_lockfile(&project_root.join(lock_name)) {
+        // `mergeLockJson` — a fresh locker adopts an existing unified lockfile
+        // wholesale (its stableOrder meta included).
+        Some(existing) if existing.meta_enable_unified_lockfile == Some(true) => {
+            locker.lockfile = existing;
+            locker.lockfile.meta_enable_unified_lockfile = Some(true);
+            locker
+        }
+        // `mergeUntiedLockJson` — merge the per-module lockfiles.
+        _ => merge_untied_lock_json(locker, project_root, module_roots, lock_name),
+    }
+}
+
+/// `mergeUntiedLockJson` — merge the per-module lockfiles into the unified
+/// locker: local dependency keys/paths become project-root-relative, and a
+/// specifier key with conflicting values drops both entries.
+fn merge_untied_lock_json(
+    mut locker: Locker,
+    project_root: &Path,
+    module_roots: &[PathBuf],
+    lock_name: &str,
+) -> Locker {
+    let mut dropped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for module_root in module_roots {
+        let Some(d) = read_lockfile(&module_root.join(lock_name)) else {
+            continue;
+        };
+        // The project-root module's lockfile becomes the base.
+        if locker.lockfile.specifiers.is_empty()
+            && locker.lockfile.packages.is_empty()
+            && module_root == project_root
+        {
+            locker.lockfile = d;
+            continue;
+        }
+        for (raw_key, raw_value) in &d.specifiers {
+            let Ok(key) = parse_dependency(raw_key, module_root) else {
+                continue;
+            };
+            let Ok(value) = parse_dependency(raw_value, module_root) else {
+                continue;
+            };
+            let mut key_str = raw_key.clone();
+            let mut value_str = raw_value.clone();
+            if matches!(key.ohpa_type, OhpaType::File | OhpaType::SourceCode) {
+                key_str = format!("{}@{}", key.name, relative_spec(project_root, &key.fetch_spec));
+            }
+            if matches!(value.ohpa_type, OhpaType::File | OhpaType::SourceCode) {
+                value_str = format!("{}@{}", key.name, relative_spec(project_root, &value.fetch_spec));
+            }
+            match locker.lockfile.specifiers.get(&key_str) {
+                Some(existing) if existing != &value_str => {
+                    locker.lockfile.specifiers.remove(&key_str);
+                    dropped.insert(key_str);
+                }
+                Some(_) => {}
+                None => {
+                    if !dropped.contains(&key_str) {
+                        locker.lockfile.specifiers.insert(key_str, value_str);
+                    }
+                }
+            }
+        }
+        for (raw_key, pkg) in &d.packages {
+            let Ok(key) = parse_dependency(raw_key, module_root) else {
+                continue;
+            };
+            let mut key_str = raw_key.clone();
+            let mut pkg = pkg.clone();
+            if matches!(key.ohpa_type, OhpaType::File | OhpaType::SourceCode) {
+                let rel = relative_spec(project_root, &key.fetch_spec);
+                pkg.resolved = rel.clone();
+                key_str = format!("{}@{rel}", key.name);
+            }
+            locker.lockfile.packages.insert(key_str, pkg);
+        }
+        locker.lockfile.meta_stable_order =
+            locker.lockfile.meta_stable_order || d.meta_stable_order;
+    }
+    locker
 }
 
 /// `PackageLocker.flush`'s write step — `JSON.stringify(lockJson, null, 2)`
@@ -647,5 +740,73 @@ mod tests {
         assert!(locker.lockfile.specifiers.is_empty());
         assert!(locker.lockfile.meta_stable_order);
         assert_eq!(locker.lockfile.meta_enable_unified_lockfile, Some(true));
+    }
+}
+
+#[cfg(test)]
+mod unified_tests {
+    use super::*;
+
+    #[test]
+    fn untied_lockfile_merge() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let proj = dir.path().join("proj");
+        std::fs::create_dir_all(proj.join("entry")).unwrap();
+        std::fs::create_dir_all(proj.join("lib1")).unwrap();
+        // Two per-module lockfiles: foo in both, entry (local) in lib1.
+        let lf1 = Lockfile {
+            meta_stable_order: true,
+            meta_enable_unified_lockfile: Some(false),
+            specifiers: BTreeMap::from([
+                ("@ohos/foo@^1.0.0".to_string(), "@ohos/foo@1.2.3".to_string()),
+            ]),
+            packages: BTreeMap::from([(
+                "@ohos/foo@1.2.3".to_string(),
+                LockPkg {
+                    name: "@ohos/foo".to_string(),
+                    version: "1.2.3".to_string(),
+                    registry_type: "ohpm".to_string(),
+                    ..Default::default()
+                },
+            )]),
+        };
+        write_lockfile(&proj.join("entry/oh-package-lock.json5"), &lf1).unwrap();
+        let lf2 = Lockfile {
+            meta_stable_order: false,
+            meta_enable_unified_lockfile: Some(false),
+            specifiers: BTreeMap::from([
+                ("entry@../entry".to_string(), "entry@<abs>".to_string()),
+            ]),
+            packages: BTreeMap::new(),
+        };
+        write_lockfile(&proj.join("lib1/oh-package-lock.json5"), &lf2).unwrap();
+
+        let roots = vec![proj.join("entry"), proj.join("lib1")];
+        let locker = load_unified_lockfile(&proj, &roots, LOCK_JSON);
+        assert_eq!(locker.lockfile.meta_enable_unified_lockfile, Some(true));
+        assert!(locker.lockfile.specifiers.contains_key("@ohos/foo@^1.0.0"));
+        assert!(locker.lockfile.packages.contains_key("@ohos/foo@1.2.3"));
+        // The module lockfiles are untouched.
+        assert!(proj.join("entry/oh-package-lock.json5").is_file());
+    }
+
+    #[test]
+    fn existing_unified_lockfile_is_adopted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let proj = dir.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let lf = Lockfile {
+            meta_stable_order: true,
+            meta_enable_unified_lockfile: Some(true),
+            specifiers: BTreeMap::from([(
+                "foo@^1.0.0".to_string(),
+                "foo@1.0.0".to_string(),
+            )]),
+            packages: BTreeMap::new(),
+        };
+        write_lockfile(&proj.join(LOCK_JSON), &lf).unwrap();
+        let locker = load_unified_lockfile(&proj, &[proj.clone()], LOCK_JSON);
+        assert_eq!(locker.lockfile.meta_enable_unified_lockfile, Some(true));
+        assert!(locker.lockfile.specifiers.contains_key("foo@^1.0.0"));
     }
 }
