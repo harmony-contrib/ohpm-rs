@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use super::{load_config, output};
 
 pub async fn run(args: &crate::cli::CleanArgs) -> Result<()> {
-    let config = load_config()?;
+    let _config = load_config()?;
     let start = std::time::Instant::now();
     if args.workspace || !args.filter.is_empty() {
         let cwd = std::env::current_dir()?;
@@ -21,7 +21,7 @@ pub async fn run(args: &crate::cli::CleanArgs) -> Result<()> {
         })?;
         ohpm_core::clean::clean_workspace(&ws, &args.filter, args.keep_lockfile)?;
     } else {
-        ohpm_core::clean::start_clean(&config, args.keep_lockfile)?;
+        ohpm_core::clean::start_clean(args.keep_lockfile)?;
     }
     let elapsed = start.elapsed().as_millis();
     output::succeed(&format!(

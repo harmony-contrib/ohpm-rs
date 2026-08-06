@@ -3,14 +3,13 @@
 //! of the project root and every build-profile module (`--keep-lockfile`
 //! preserves the lockfiles).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crate::config::Config;
 use crate::error::{OhpmError, Result};
 use crate::install::modules::ProjectBuildProfile;
 
 /// `startClean` — clean the project root and its modules.
-pub fn start_clean(config: &Config, keep_lockfile: bool) -> Result<()> {
+pub fn start_clean(keep_lockfile: bool) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_default();
     // `config.getProjectRoot()` — the build-profile based project root.
     let project_root = crate::config::find_project_root(&cwd);
@@ -98,20 +97,6 @@ pub fn clean_workspace(
         clean_module(&member.dir, keep_lockfile)?;
     }
     Ok(())
-}
-
-/// The cleaned module roots (for the CLI's cost message).
-pub fn module_roots_to_clean(config: &Config) -> Result<Vec<PathBuf>> {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let project_root = crate::config::find_project_root(&cwd);
-    let Some(project_root) = project_root else {
-        return Ok(Vec::new());
-    };
-    let mut roots = ProjectBuildProfile::load(&project_root)
-        .map(|p| p.get_module_roots().to_vec())
-        .unwrap_or_default();
-    roots.push(project_root);
-    Ok(roots)
 }
 
 #[cfg(test)]
