@@ -84,6 +84,33 @@ impl Resolver {
         Ok(())
     }
 
+    /// `PackageLockerManager.deleteSpecifier` — remove a specifier key of the
+    /// module's locker (used by the update command).
+    pub async fn delete_specifier(&self, root_dir: &Path, key: &str) {
+        self.with_locker(root_dir, |locker| {
+            locker.delete_specifier(key);
+        })
+        .await;
+    }
+
+    /// `PackageLockerManager.clearSpecifiers` — clear the module's specifiers
+    /// (used by `update --all`).
+    pub async fn clear_specifiers(&self, root_dir: &Path) {
+        self.with_locker(root_dir, |locker| {
+            locker.clear_specifiers();
+        })
+        .await;
+    }
+
+    /// `syncLoadLockers` — eagerly load the lockers for the module roots so an
+    /// empty graph still flushes (update/uninstall with no remaining deps).
+    pub async fn ensure_lockers(&self, roots: &[PathBuf]) {
+        let mut lockers = self.lockers.lock().await;
+        for root in roots {
+            lockers.entry(root.clone()).or_insert_with(|| Locker::load(root));
+        }
+    }
+
     /// Run `f` with the (mutable) locker for `root_dir`.
     async fn with_locker<T>(&self, root_dir: &Path, f: impl FnOnce(&mut Locker) -> T) -> T {
         let mut lockers = self.lockers.lock().await;

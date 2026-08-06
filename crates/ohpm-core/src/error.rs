@@ -250,6 +250,27 @@ impl OhpmError {
 
     // ---- install ----------------------------------------------------------
 
+    pub fn update_has_version(version: &str) -> Self {
+        Self::new(
+            "UpdateHasVersion",
+            format!("Update arguments must not contain package version specifier \"{version}\"."),
+        )
+    }
+
+    pub fn uninstall_no_pkg() -> Self {
+        Self::new(
+            "UninstallNoPkg",
+            "Must provide a package name to uninstall in global repository.",
+        )
+    }
+
+    pub fn uninstall_has_version(version: &str) -> Self {
+        Self::new(
+            "UninstallHasVersion",
+            format!("Uninstall arguments must not contain package version specifier \"{version}\"."),
+        )
+    }
+
     pub fn install_field_is_empty(field: &str) -> Self {
         Self::new(
             "FieldISEmptyError",

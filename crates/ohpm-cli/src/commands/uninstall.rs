@@ -1,14 +1,14 @@
-//! `ohpm install [pkg...]` — install dependencies (mirrors
-//! `lib/commands/install.js` + `lib/core/install/service/install.js`).
+//! `ohpm uninstall <pkg...>` — uninstall package(s)
+//! (mirrors `lib/commands/uninstall.js` + `lib/core/install/service/uninstall.js`).
 
 use anyhow::Result;
 use ohpm_core::install::InstallOptions;
 use ohpm_core::registry::RegistryClient;
 
 use super::{apply_cli_options, load_config, output, resolve_prefix};
-use crate::cli::InstallArgs;
+use crate::cli::UninstallArgs;
 
-pub async fn run(args: &InstallArgs) -> Result<()> {
+pub async fn run(args: &UninstallArgs) -> Result<()> {
     let mut config = load_config()?;
     apply_cli_options(
         &mut config,
@@ -19,14 +19,10 @@ pub async fn run(args: &InstallArgs) -> Result<()> {
         args.retry_interval,
         args.registry.as_deref(),
     )?;
-    let prefix = resolve_prefix(args.prefix.as_deref(), "install")?;
+    let prefix = resolve_prefix(args.prefix.as_deref(), "uninstall")?;
 
     let opts = InstallOptions {
         save: !args.no_save,
-        save_dev: args.save_dev,
-        save_prod: args.save_prod,
-        save_dynamic: args.save_dynamic,
-        link: !args.no_link,
         all: args.all,
         prefix: Some(prefix.clone()),
         registry: args.registry.clone(),
@@ -39,10 +35,10 @@ pub async fn run(args: &InstallArgs) -> Result<()> {
     };
 
     let client = RegistryClient::from_config(&config)?;
-    let outcome = ohpm_core::install::install(&client, &config, &prefix, &args.pkg, &opts).await?;
-
+    let outcome =
+        ohpm_core::install::uninstall(&client, &config, &prefix, &args.pkg, &opts).await?;
     output::succeed(&format!(
-        "install success, {} packages installed, {} modules",
+        "uninstall success, {} packages installed, {} modules",
         outcome.installed,
         outcome.module_roots.len()
     ));

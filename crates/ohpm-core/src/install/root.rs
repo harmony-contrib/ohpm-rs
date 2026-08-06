@@ -17,6 +17,21 @@ use crate::install::node::{DepType, Node, NodeData, Requirement};
 use crate::install::spec::{parse_dependency, OhpaType, Spec};
 use crate::package::Manifest;
 
+/// The command driving the install pipeline (`GlobalState.CommandType`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallCommand {
+    Install,
+    Update,
+    Uninstall,
+}
+
+/// `PackageUtil.parse` — the name/version split used by the update/uninstall
+/// argument validation (the last `@` splits; scoped names keep their scope).
+pub fn parse_cli_pkg_version(raw: &str) -> Option<String> {
+    let n = raw.rfind('@').unwrap_or(0);
+    (n > 0).then(|| raw[n + 1..].to_string())
+}
+
 /// `getRootNode` — build a module's root node from its `oh-package.json5`.
 /// The standard project root's name/version are blanked (the reference blanks
 /// them for the project-level module).
@@ -62,13 +77,16 @@ pub fn get_root_node(
     )
 }
 
-/// `handleCliInput` — add CLI packages to the root node's requirements.
-/// Returns the cli-input names (the reference's module-global `cliInputNames`).
+/// `handleCliInput` — add/remove/warn about CLI packages on the root node's
+/// requirements, dispatched by `command`. Returns the cli-input names for the
+/// INSTALL branch (the reference's module-global `cliInputNames`); UPDATE and
+/// UNINSTALL never write new dependencies.
 pub fn handle_cli_input(
     prefix: &Path,
     args: &[String],
     root: &mut Node,
     opts: &crate::install::InstallOptions,
+    command: InstallCommand,
 ) -> Result<Vec<String>> {
     let mut names = Vec::new();
     for raw in args {
@@ -82,17 +100,39 @@ pub fn handle_cli_input(
             Some(n) => n,
             None => return Err(OhpmError::install_invalid_cli_input_pkg(&parsed.raw)),
         };
-        if opts.save {
-            names.push(name.clone());
-            update_dependencies(root, &name, &parsed.raw_spec, opts);
-        } else {
-            root.requirements.insert(
-                name,
-                Requirement {
-                    spec: parsed.fetch_spec.clone(),
-                    dep_type: DepType::NoSave,
-                },
-            );
+        match command {
+            InstallCommand::Install => {
+                if opts.save {
+                    names.push(name.clone());
+                    update_dependencies(root, &name, &parsed.raw_spec, opts);
+                } else {
+                    root.requirements.insert(
+                        name,
+                        Requirement {
+                            spec: parsed.fetch_spec.clone(),
+                            dep_type: DepType::NoSave,
+                        },
+                    );
+                }
+            }
+            InstallCommand::Update => {
+                if !root.requirements.contains_key(&name) {
+                    log::warn!(
+                        "The package you want to update: \"{name}\" does not exist in {}",
+                        prefix.join(MY_PACKAGE_JSON).display()
+                    );
+                }
+            }
+            InstallCommand::Uninstall => {
+                if root.requirements.contains_key(&name) {
+                    root.requirements.remove(&name);
+                } else {
+                    log::warn!(
+                        "The package you want to uninstall: \"{name}\" does not exist in {}",
+                        prefix.join(MY_PACKAGE_JSON).display()
+                    );
+                }
+            }
         }
     }
     Ok(names)
@@ -195,13 +235,20 @@ fn relative_slash(from: &Path, to: &Path) -> String {
 /// `updatePkgJson.js` — rewrite the manifest's dependency maps when changed;
 /// parameterized manifests (`${`) are skipped. `requirements` is the
 /// post-`updateCommandLineInputDependencies` root requirement map.
+///
+/// `cli_input_names` is `Some` for INSTALL (empty means "don't write") and
+/// `None` for UPDATE/UNINSTALL (always write, like the reference's `undefined`).
 pub fn update_pkg_json(
     prefix: &Path,
     requirements: &BTreeMap<String, Requirement>,
     opts: &crate::install::InstallOptions,
-    cli_input_names: &[String],
+    cli_input_names: Option<&[String]>,
 ) -> Result<bool> {
-    if cli_input_names.is_empty() || !opts.save {
+    let write = match cli_input_names {
+        Some(names) => !names.is_empty(),
+        None => true,
+    };
+    if !write || !opts.save {
         return Ok(false);
     }
     let path = prefix.join(MY_PACKAGE_JSON);
@@ -306,7 +353,7 @@ mod tests {
             save_dev: true,
             ..Default::default()
         };
-        let names = handle_cli_input(dir.path(), &["foo@^2.0.0".to_string()], &mut root, &opts).unwrap();
+        let names = handle_cli_input(dir.path(), &["foo@^2.0.0".to_string()], &mut root, &opts, InstallCommand::Install).unwrap();
         assert_eq!(names, vec!["foo"]);
         assert_eq!(root.requirements["foo"].spec, "^2.0.0");
         assert_eq!(root.requirements["foo"].dep_type, DepType::Dev);
@@ -317,7 +364,7 @@ mod tests {
             save: false,
             ..Default::default()
         };
-        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts).unwrap();
+        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts, InstallCommand::Install).unwrap();
         assert!(names.is_empty());
         assert_eq!(root.requirements["foo"].spec, "latest");
         assert_eq!(root.requirements["foo"].dep_type, DepType::NoSave);
@@ -325,7 +372,7 @@ mod tests {
         // Bare name with save: requirement spec is empty (parses as latest).
         let mut root = get_root_node(dir.path(), true, None).unwrap();
         let opts = InstallOptions::default();
-        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts).unwrap();
+        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts, InstallCommand::Install).unwrap();
         assert_eq!(names, vec!["foo"]);
         assert_eq!(root.requirements["foo"].spec, "");
     }
@@ -336,7 +383,7 @@ mod tests {
         write_manifest(dir.path(), "{}", "{}", "{}");
         let mut root = get_root_node(dir.path(), true, None).unwrap();
         let opts = InstallOptions::default();
-        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts).unwrap();
+        let names = handle_cli_input(dir.path(), &["foo".to_string()], &mut root, &opts, InstallCommand::Install).unwrap();
         // Resolve the requirement spec like updateCommandLineInputDependencies.
         root.requirements.insert(
             "foo".to_string(),
@@ -345,13 +392,13 @@ mod tests {
                 dep_type: DepType::Prod,
             },
         );
-        let written = update_pkg_json(dir.path(), &root.requirements, &opts, &names).unwrap();
+        let written = update_pkg_json(dir.path(), &root.requirements, &opts, Some(&names)).unwrap();
         assert!(written);
         let text = fs::read_to_string(dir.path().join(MY_PACKAGE_JSON)).unwrap();
         assert!(text.contains("\"foo\": \"^1.2.3\""));
         assert!(text.contains("\"devDependencies\": {}"));
         // Unchanged → no rewrite.
-        let written2 = update_pkg_json(dir.path(), &root.requirements, &opts, &names).unwrap();
+        let written2 = update_pkg_json(dir.path(), &root.requirements, &opts, Some(&names)).unwrap();
         assert!(!written2);
 
         // Parameterized manifests are skipped.
@@ -363,7 +410,7 @@ mod tests {
         )
         .unwrap();
         let mut root2 = get_root_node(&param, true, None).unwrap();
-        let names2 = handle_cli_input(&param, &["foo".to_string()], &mut root2, &opts).unwrap();
+        let names2 = handle_cli_input(&param, &["foo".to_string()], &mut root2, &opts, InstallCommand::Install).unwrap();
         root2.requirements.insert(
             "foo".to_string(),
             Requirement {
@@ -371,6 +418,6 @@ mod tests {
                 dep_type: DepType::Prod,
             },
         );
-        assert!(!update_pkg_json(&param, &root2.requirements, &opts, &names2).unwrap());
+        assert!(!update_pkg_json(&param, &root2.requirements, &opts, Some(&names2)).unwrap());
     }
 }

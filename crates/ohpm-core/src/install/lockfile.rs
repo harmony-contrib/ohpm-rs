@@ -273,16 +273,22 @@ pub struct Locker {
 
 impl Locker {
     /// `syncLoadLockers` + `createPkgLocker` for a single module root.
+    ///
+    /// `createPkgLocker`'s `mergeLockJson` keeps the file's `stableOrder` but
+    /// always stamps `enableUnifiedLockfile` with `shouldUseUnifiedLockfile()`
+    /// (false in the non-unified mode); fresh lockers get the default shape
+    /// (`stableOrder: true`).
     pub fn load(module_root: &Path) -> Locker {
         let path = module_root.join(LOCK_JSON);
         let was_present = path.exists();
-        let mut lockfile = read_lockfile(&path).unwrap_or_default();
-        if !was_present {
-            // `defaultLockJson`: stableOrder=true; `createPkgLocker` stamps
-            // the unified flag on fresh lockers.
+        let parsed = read_lockfile(&path);
+        let mut lockfile = parsed.clone().unwrap_or_default();
+        if parsed.is_none() {
             lockfile.meta_stable_order = true;
-            lockfile.meta_enable_unified_lockfile = Some(false);
         }
+        // Fresh lockers and `createPkgLocker`'s merge path both stamp the
+        // unified flag with `shouldUseUnifiedLockfile()` (false here).
+        lockfile.meta_enable_unified_lockfile = Some(false);
         Locker {
             module_root: module_root.to_path_buf(),
             lockfile,

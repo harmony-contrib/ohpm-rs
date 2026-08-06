@@ -39,6 +39,10 @@ pub enum Command {
     Cache(CacheArgs),
     /// Install packages from the registry or local sources.
     Install(InstallArgs),
+    /// Update package(s) to their latest version based on the specified range.
+    Update(UpdateArgs),
+    /// Uninstall package(s).
+    Uninstall(UninstallArgs),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -281,6 +285,69 @@ pub struct InstallArgs {
     #[arg(long = "retry_times")]
     pub retry_times: Option<u32>,
     /// Retry interval in milliseconds.
+    #[arg(long = "retry_interval")]
+    pub retry_interval: Option<u64>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UpdateArgs {
+    /// Package names to update (without versions).
+    #[arg(value_name = "pkg")]
+    pub pkg: Vec<String>,
+    /// Update a package or all dependencies in the current module and install
+    /// the dependencies of all modules in the project.
+    #[arg(long)]
+    pub all: bool,
+    /// Update a package or all dependencies in all modules.
+    #[arg(long = "all-modules")]
+    pub all_modules: bool,
+    /// Update the dependencies whose tag matches the regular expression.
+    #[arg(long = "tag-filter")]
+    pub tag_filter: Option<String>,
+    /// Package root directory.
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Specify the registry.
+    #[arg(long)]
+    pub registry: Option<String>,
+    #[arg(long = "fetch_timeout")]
+    pub fetch_timeout: Option<u64>,
+    #[arg(long = "strict_ssl")]
+    pub strict_ssl: Option<bool>,
+    #[arg(long = "max_concurrent")]
+    pub max_concurrent: Option<u64>,
+    #[arg(long = "retry_times")]
+    pub retry_times: Option<u32>,
+    #[arg(long = "retry_interval")]
+    pub retry_interval: Option<u64>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct UninstallArgs {
+    /// Package names to uninstall (without versions).
+    #[arg(value_name = "pkg")]
+    pub pkg: Vec<String>,
+    /// Do not save to oh-package.json5.
+    #[arg(long = "no-save")]
+    pub no_save: bool,
+    /// Uninstall a package in the current module and install the dependencies
+    /// of all modules in the project.
+    #[arg(long)]
+    pub all: bool,
+    /// Package root directory.
+    #[arg(long)]
+    pub prefix: Option<String>,
+    /// Specify the registry.
+    #[arg(long)]
+    pub registry: Option<String>,
+    #[arg(long = "fetch_timeout")]
+    pub fetch_timeout: Option<u64>,
+    #[arg(long = "strict_ssl")]
+    pub strict_ssl: Option<bool>,
+    #[arg(long = "max_concurrent")]
+    pub max_concurrent: Option<u64>,
+    #[arg(long = "retry_times")]
+    pub retry_times: Option<u32>,
     #[arg(long = "retry_interval")]
     pub retry_interval: Option<u64>,
 }

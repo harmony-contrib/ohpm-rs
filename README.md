@@ -14,6 +14,8 @@ ohpm-rs (OpenHarmony package manager), a Rust reimplementation of ohpm
 
 Commands:
   install     Install package(s) from the registry or local sources
+  update      Update package(s) to their latest version
+  uninstall   Uninstall package(s)
   publish     Publish a package to the registry
   prepublish  Pre-verify package content without publishing
   init        Create an oh-package.json5 file
@@ -46,7 +48,11 @@ A cargo workspace with two crates:
   install record (`lock_record`) and the pipeline orchestration (`root`/
   `mod`). The lockfile, install record, `oh_modules` layout and manifest
   rewrites are byte-compatible with the reference (verified against ohpm 6.0.1
-  on the public registry).
+  on the public registry). `install`, `update` and `uninstall` share the same
+  pipeline (`run_pipeline`), like the reference's `installModules`; `update`
+  clears/deletes the matching lockfile specifiers before re-resolving, and
+  `uninstall` drops the packages from the root requirements and rewrites the
+  manifest.
 - **`crates/ohpm-cli`** — the `ohpm-rs` binary: clap command definitions and thin
   command handlers.
 
@@ -57,7 +63,7 @@ installation (`config/`, `core/registry/`, `core/publish/`, `core/package/`).
 
 ```sh
 cargo build --workspace        # binary: target/debug/ohpm-rs
-cargo test  --workspace        # 138 tests: unit + mock-registry integration
+cargo test  --workspace        # 140 tests: unit + mock-registry integration
 ```
 
 ## Environment-variable authentication (CI)
@@ -277,7 +283,7 @@ via `file:`) but marks it non-publishable.
 - `oh-package.json5` is parsed as JSON5; unknown fields round-trip into the
   published metadata.
 - The `.tgz` (HSP) bundle path (`InterfaceHar` + `.hsp`) is implemented.
-- Out of scope: `update`/`uninstall` (they reuse the install pipeline), script
-  hooks, conflict resolution (strict/overrides), unified lockfiles, HSP
-  packages, the `config encrypt` crypto component, and rayon-accelerated
-  extraction (the pipeline currently uses `spawn_blocking` + a semaphore).
+- Out of scope: script hooks, conflict resolution (strict/overrides), unified
+  lockfiles, HSP packages, the `config encrypt` crypto component, and
+  rayon-accelerated extraction (the pipeline currently uses `spawn_blocking` +
+  a semaphore).

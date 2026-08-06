@@ -141,9 +141,9 @@ fn sha1_hex(bytes: &[u8]) -> String {
 
 async fn spawn_mock(
     registry: MockRegistry,
-) -> (String, Arc<Mutex<Capture>>) {
+) -> (String, Arc<Mutex<MockRegistry>>, Arc<Mutex<Capture>>) {
     let capture = Arc::new(Mutex::new(Capture::default()));
-    let registry = Arc::new(registry);
+    let registry = Arc::new(Mutex::new(registry));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // `{*rest}`: scoped names contain "/" and are not a single path segment.
@@ -153,13 +153,14 @@ async fn spawn_mock(
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
-    (format!("http://{addr}/ohpm/"), capture)
+    (format!("http://{addr}/ohpm/"), registry, capture)
 }
 
 async fn ohpm_handler(
-    State((registry, capture, addr)): State<(Arc<MockRegistry>, Arc<Mutex<Capture>>, String)>,
+    State((registry, capture, addr)): State<(Arc<Mutex<MockRegistry>>, Arc<Mutex<Capture>>, String)>,
     AxumPath(rest): AxumPath<String>,
 ) -> impl IntoResponse {
+    let registry = registry.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((name, file)) = rest.split_once("/-/") {
         return tarball_response(&registry, &capture, name, file);
     }
@@ -325,7 +326,7 @@ async fn fresh_install_layout_and_lockfile() {
     let work = tempfile::TempDir::new().unwrap();
     let cache = tempfile::TempDir::new().unwrap();
     let (registry, _tarballs) = sample_registry(work.path());
-    let (addr, capture) = spawn_mock(registry).await;
+    let (addr, _registry, capture) = spawn_mock(registry).await;
 
     let prefix = work.path().join("entry");
     write_manifest(&prefix, "{ \"@ohos/foo\": \"^1.2.0\" }", "{ \"unittest\": \"1.0.0\" }");
@@ -412,7 +413,7 @@ async fn cli_input_saves_resolved_version() {
     let work = tempfile::TempDir::new().unwrap();
     let cache = tempfile::TempDir::new().unwrap();
     let (registry, _tarballs) = sample_registry(work.path());
-    let (addr, capture) = spawn_mock(registry).await;
+    let (addr, _registry, capture) = spawn_mock(registry).await;
 
     let prefix = work.path().join("entry");
     write_manifest(&prefix, "{}", "{}");
@@ -458,7 +459,7 @@ async fn integrity_mismatch_fails() {
     let cache = tempfile::TempDir::new().unwrap();
     let (mut registry, _tarballs) = sample_registry(work.path());
     registry.corrupt_tarballs = true;
-    let (addr, _capture) = spawn_mock(registry).await;
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
 
     let prefix = work.path().join("entry");
     write_manifest(&prefix, "{ \"@ohos/foo\": \"^1.2.0\" }", "{}");
@@ -477,7 +478,7 @@ async fn missing_package_and_unresolvable_spec() {
     let work = tempfile::TempDir::new().unwrap();
     let cache = tempfile::TempDir::new().unwrap();
     let (registry, _tarballs) = sample_registry(work.path());
-    let (addr, _capture) = spawn_mock(registry).await;
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
 
     // Unknown package -> FetcherRegistryFetchPkgInfoFailed.
     let prefix = work.path().join("entry");
@@ -504,7 +505,7 @@ async fn local_file_dependency() {
     let work = tempfile::TempDir::new().unwrap();
     let cache = tempfile::TempDir::new().unwrap();
     let (registry, _tarballs) = sample_registry(work.path());
-    let (addr, _capture) = spawn_mock(registry).await;
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
 
     // A local .har dependency next to the project.
     let lib = work.path().join("lib");
@@ -540,4 +541,110 @@ async fn local_file_dependency() {
         lock_text.contains("mylib@../lib/mylib-1.0.0.har"),
         "the lockfile must record the local file specifier: {lock_text}"
     );
+}
+
+#[tokio::test]
+async fn update_moves_to_new_version() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let (registry, _tarballs) = sample_registry(work.path());
+    let (addr, registry_handle, _capture) = spawn_mock(registry).await;
+
+    let prefix = work.path().join("entry");
+    write_manifest(&prefix, "{ \"@ohos/foo\": \"^1.2.0\" }", "{}");
+    let cfg = load_config(home.path(), &addr, cache.path());
+
+    // Install pins 1.2.3.
+    run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    let lock_text = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
+    assert!(lock_text.contains("\"@ohos/foo@^1.2.0\": \"@ohos/foo@1.2.3\""), "{lock_text}");
+
+    // The registry gains 1.3.0.
+    let new_har = build_har(work.path(), "@ohos/foo", "1.3.0", &BTreeMap::new());
+    let mut r = registry_handle.lock().unwrap();
+    r.packages
+        .get_mut("@ohos/foo")
+        .unwrap()
+        .versions
+        .insert(
+            "1.3.0".to_string(),
+            MockVersion {
+                tarball: new_har,
+                deps: BTreeMap::new(),
+                dev_deps: BTreeMap::new(),
+            },
+        );
+    drop(r);
+
+    // `ohpm update` (no args) clears the specifiers and re-resolves.
+    let client = RegistryClient::from_config(&cfg).unwrap();
+    ohpm_core::install::update(&client, &cfg, &prefix, &[], &InstallOptions::default())
+        .await
+        .unwrap();
+    let lock_text = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
+    assert!(lock_text.contains("\"@ohos/foo@^1.2.0\": \"@ohos/foo@1.3.0\""), "{lock_text}");
+    assert!(prefix.join("oh_modules/.ohpm/@ohos+foo@1.3.0/oh_modules/@ohos/foo/oh-package.json5").is_file());
+    let _ = registry;
+}
+
+#[tokio::test]
+async fn uninstall_removes_package() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let (registry, _tarballs) = sample_registry(work.path());
+    let (addr, _registry_handle, _capture) = spawn_mock(registry).await;
+
+    let prefix = work.path().join("entry");
+    write_manifest(&prefix, "{ \"@ohos/foo\": \"^1.2.0\" }", "{}");
+    let cfg = load_config(home.path(), &addr, cache.path());
+
+    run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    assert!(prefix.join("oh_modules/@ohos/foo").exists());
+
+    // `ohpm uninstall @ohos/foo` — removed from the manifest, the lockfile and
+    // the top-level links.
+    let client = RegistryClient::from_config(&cfg).unwrap();
+    ohpm_core::install::uninstall(&client, &cfg, &prefix, &["@ohos/foo".to_string()], &InstallOptions::default())
+        .await
+        .unwrap();
+
+    let manifest_text = std::fs::read_to_string(prefix.join("oh-package.json5")).unwrap();
+    assert!(!manifest_text.contains("@ohos/foo"), "{manifest_text}");
+    let lock_text = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
+    assert!(!lock_text.contains("@ohos/foo"), "{lock_text}");
+    assert!(!prefix.join("oh_modules/@ohos/foo").exists(), "top-level link removed");
+    // The install record is not rewritten when the graph is empty (mirrors
+    // `installModules`' `packages.length === 0` early return) — the previous
+    // file stays, like the reference.
+    assert!(prefix.join("oh_modules/.ohpm/lock.json5").is_file());
+
+    // Versions in arguments are rejected.
+    let err = ohpm_core::install::uninstall(
+        &client,
+        &cfg,
+        &prefix,
+        &["@ohos/foo@1.0.0".to_string()],
+        &InstallOptions::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "UninstallHasVersion");
+    let err = ohpm_core::install::update(
+        &client,
+        &cfg,
+        &prefix,
+        &["@ohos/foo@1.0.0".to_string()],
+        &InstallOptions::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.code, "UpdateHasVersion");
 }

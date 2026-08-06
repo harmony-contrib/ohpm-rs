@@ -36,5 +36,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Version(args) => commands::version::run(&args).await,
         Command::Cache(args) => commands::cache::run(args.action).await,
         Command::Install(args) => commands::install::run(&args).await,
+        Command::Update(args) => commands::update::run(&args).await,
+        Command::Uninstall(args) => commands::uninstall::run(&args).await,
     }
 }

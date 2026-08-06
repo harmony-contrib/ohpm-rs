@@ -2,7 +2,8 @@
 //! `oh_modules` linking, mirroring the reference `lib/core/install/`.
 //!
 //! The pipeline mirrors pnpm's Rust engine (pacquet): resolution → lockfile →
-//! store → linking, in a single program.
+//! store → linking, in a single program. `install`, `update` and `uninstall`
+//! share one pipeline (`run_pipeline`), like the reference's `installModules`.
 
 pub mod graph;
 pub mod lock_record;
@@ -21,8 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::{default::types, Config};
-use crate::error::Result;
+use crate::error::{OhpmError, Result};
 use crate::registry::RegistryClient;
+use root::InstallCommand;
 
 /// `ohpm install` options (mirrors `lib/core/install/common/definitions.js`).
 #[derive(Debug, Clone)]
@@ -36,6 +38,11 @@ pub struct InstallOptions {
     pub link: bool,
     /// `--all` — install all project modules' dependencies.
     pub all: bool,
+    /// `--all-modules` (update) — act on every module root.
+    pub all_modules: bool,
+    /// `--tag-filter` (update) — only update tag dependencies whose tag
+    /// matches this regex.
+    pub tag_filter: Option<String>,
     /// `--prefix`.
     pub prefix: Option<PathBuf>,
     pub registry: Option<String>,
@@ -55,6 +62,8 @@ impl Default for InstallOptions {
             save_dynamic: false,
             link: true,
             all: false,
+            all_modules: false,
+            tag_filter: None,
             prefix: None,
             registry: None,
             fetch_timeout: None,
@@ -74,9 +83,27 @@ pub struct InstallOutcome {
     pub cli_input_names: Vec<String>,
 }
 
-/// `core/install/service/install.js` — the full pipeline:
-/// module roots → root nodes → graph build → install → symlink → install
-/// record → manifest update → lockfile flush.
+/// The update outcome.
+#[derive(Debug, Clone)]
+pub struct UpdateOutcome {
+    pub module_roots: Vec<PathBuf>,
+    pub installed: usize,
+}
+
+/// The uninstall outcome.
+#[derive(Debug, Clone)]
+pub struct UninstallOutcome {
+    pub module_roots: Vec<PathBuf>,
+    pub installed: usize,
+}
+
+struct PipelineOutcome {
+    module_roots: Vec<PathBuf>,
+    installed: usize,
+    cli_input_names: Vec<String>,
+}
+
+/// `core/install/service/install.js` — `install`.
 pub async fn install(
     client: &RegistryClient,
     config: &Config,
@@ -84,6 +111,73 @@ pub async fn install(
     args: &[String],
     opts: &InstallOptions,
 ) -> Result<InstallOutcome> {
+    let outcome = run_pipeline(client, config, prefix, args, opts, InstallCommand::Install).await?;
+    Ok(InstallOutcome {
+        module_roots: outcome.module_roots,
+        installed: outcome.installed,
+        cli_input_names: outcome.cli_input_names,
+    })
+}
+
+/// `core/install/service/update.js` — `updateSymlink`.
+pub async fn update(
+    client: &RegistryClient,
+    config: &Config,
+    prefix: &Path,
+    args: &[String],
+    opts: &InstallOptions,
+) -> Result<UpdateOutcome> {
+    // `PackageUtil.parse` — update arguments must not carry versions.
+    for raw in args {
+        if let Some(version) = root::parse_cli_pkg_version(raw) {
+            return Err(OhpmError::update_has_version(&version));
+        }
+    }
+    let outcome = run_pipeline(client, config, prefix, args, opts, InstallCommand::Update).await?;
+    Ok(UpdateOutcome {
+        module_roots: outcome.module_roots,
+        installed: outcome.installed,
+    })
+}
+
+/// `core/install/service/uninstall.js` — `uninstallSymlink`.
+pub async fn uninstall(
+    client: &RegistryClient,
+    config: &Config,
+    prefix: &Path,
+    args: &[String],
+    opts: &InstallOptions,
+) -> Result<UninstallOutcome> {
+    if args.is_empty() {
+        return Err(OhpmError::uninstall_no_pkg());
+    }
+    for raw in args {
+        if let Some(version) = root::parse_cli_pkg_version(raw) {
+            return Err(OhpmError::uninstall_has_version(&version));
+        }
+    }
+    // `uninstallSymlink` forces all save kinds so the manifest rewrite removes
+    // the uninstalled packages from every dependency map.
+    let mut opts = opts.clone();
+    opts.save_dynamic = true;
+    opts.save_dev = true;
+    opts.save_prod = true;
+    let outcome = run_pipeline(client, config, prefix, args, &opts, InstallCommand::Uninstall).await?;
+    Ok(UninstallOutcome {
+        module_roots: outcome.module_roots,
+        installed: outcome.installed,
+    })
+}
+
+/// The shared pipeline (`installModules` + the per-command wrapper steps).
+async fn run_pipeline(
+    client: &RegistryClient,
+    config: &Config,
+    prefix: &Path,
+    args: &[String],
+    opts: &InstallOptions,
+    command: InstallCommand,
+) -> Result<PipelineOutcome> {
     let max_concurrent = opts
         .max_concurrent
         .unwrap_or(config.get_number(types::MAX_CONCURRENT) as u64)
@@ -106,7 +200,8 @@ pub async fn install(
         .unwrap_or_else(|| prefix.to_path_buf());
     let module_roots = modules::module_roots(prefix, install_all, project.as_ref());
 
-    // 2. root nodes + CLI input.
+    // 2. root nodes + CLI input (`getRootNodeForInstallation`: UPDATE with
+    // `--all-modules`, or the prefix module, gets the CLI input handling).
     let resolver = Arc::new(resolver::Resolver::new(
         client.clone(),
         config.clone(),
@@ -114,14 +209,23 @@ pub async fn install(
     ));
     let mut roots: Vec<(PathBuf, Arc<node::Node>)> = Vec::new();
     let mut cli_input_names = Vec::new();
+    let handle_cli_on_all = command == InstallCommand::Update && opts.all_modules;
     for module_root in &module_roots {
         let mut root = root::get_root_node(module_root, opts.link, project.as_ref())?;
-        if module_root == prefix {
-            cli_input_names = root::handle_cli_input(prefix, args, &mut root, opts)?;
+        if handle_cli_on_all || module_root == prefix {
+            cli_input_names =
+                root::handle_cli_input(module_root, args, &mut root, opts, command)?;
         }
         roots.push((module_root.clone(), Arc::new(root)));
     }
-     *resolver.cli_input_names.lock().unwrap() = cli_input_names.clone();
+    *resolver.cli_input_names.lock().unwrap() = cli_input_names.clone();
+    // `syncLoadLockers` — lockers exist even when the graph ends up empty.
+    resolver.ensure_lockers(&module_roots).await;
+
+    // 2b. update: delete the matching lockfile specifiers (or clear them).
+    if command == InstallCommand::Update {
+        update_delete_specifiers(&resolver, &roots, &module_roots, prefix, args, opts).await;
+    }
 
     // 3. graph build — one graph per module root (mirrors installMultiModules).
     let mut graphs = Vec::new();
@@ -170,13 +274,34 @@ pub async fn install(
     let record = lock_record::resolve(&graphs, &project_root, &settings);
     lock_record::write_lock_record(&project_root, &record)?;
 
-    // 7. manifest update for the install-root module.
-    if let Some(updated) = root::update_command_line_input_dependencies(
-        &graphs[0],
-        &cli_input_names,
-        prefix,
-    )? {
-        root::update_pkg_json(prefix, &updated, opts, &cli_input_names)?;
+    // 7. manifest update (command-dependent).
+    match command {
+        InstallCommand::Install => {
+            if let Some(updated) = root::update_command_line_input_dependencies(
+                &graphs[0],
+                &cli_input_names,
+                prefix,
+            )? {
+                root::update_pkg_json(prefix, &updated, opts, Some(&cli_input_names))?;
+            }
+        }
+        InstallCommand::Update => {
+            let targets: Vec<PathBuf> = if opts.all_modules {
+                module_roots.clone()
+            } else {
+                vec![prefix.to_path_buf()]
+            };
+            for module_root in &targets {
+                if let Some((_, root)) = roots.iter().find(|(d, _)| d == module_root) {
+                    root::update_pkg_json(module_root, &root.requirements, opts, None)?;
+                }
+            }
+        }
+        InstallCommand::Uninstall => {
+            if let Some((_, root)) = roots.iter().find(|(d, _)| d == prefix) {
+                root::update_pkg_json(prefix, &root.requirements, opts, None)?;
+            }
+        }
     }
 
     // 8. flush the lockers (oh-package-lock.json5).
@@ -187,11 +312,74 @@ pub async fn install(
         store::delete_empty_oh_modules_dir(module_root)?;
     }
 
-    Ok(InstallOutcome {
+    Ok(PipelineOutcome {
         module_roots,
         installed,
         cli_input_names,
     })
+}
+
+/// `update.js` — delete the lockfile specifiers of the packages being updated
+/// (or clear all specifiers for `update` with no arguments).
+async fn update_delete_specifiers(
+    resolver: &Arc<resolver::Resolver>,
+    roots: &[(PathBuf, Arc<node::Node>)],
+    module_roots: &[PathBuf],
+    prefix: &Path,
+    args: &[String],
+    opts: &InstallOptions,
+) {
+    let has_targets = !args.is_empty() || opts.tag_filter.is_some();
+    if !has_targets {
+        // `clearSpecifiers(prefix, options)` — all lockers when --all-modules.
+        if opts.all_modules {
+            for module_root in module_roots {
+                resolver.clear_specifiers(module_root).await;
+            }
+        } else {
+            resolver.clear_specifiers(prefix).await;
+        }
+        return;
+    }
+    let targets: Vec<PathBuf> = if opts.all_modules {
+        module_roots.to_vec()
+    } else {
+        vec![prefix.to_path_buf()]
+    };
+    let filter = opts
+        .tag_filter
+        .as_ref()
+        .and_then(|f| regex::Regex::new(f).ok());
+    for module_root in &targets {
+        let Some((_, root)) = roots.iter().find(|(d, _)| d == module_root) else {
+            continue;
+        };
+        // `pkgs ? keys filtered by pkgs : all keys`
+        let names: Vec<String> = if args.is_empty() {
+            root.requirements.keys().cloned().collect()
+        } else {
+            args.iter()
+                .filter(|a| root.requirements.contains_key(*a))
+                .cloned()
+                .collect()
+        };
+        for name in names {
+            let spec = root.requirements[&name].spec.clone();
+            if let Some(filter) = &filter {
+                // `isStandardTagDependency(spec) && filter.test(tag)`
+                if !crate::install::spec::is_standard_tag_dependency(&spec) {
+                    continue;
+                }
+                let tag = &spec[crate::constants::TAG_PREFIX.len()..];
+                if !filter.is_match(tag) {
+                    continue;
+                }
+            }
+            resolver
+                .delete_specifier(module_root, &format!("{name}@{spec}"))
+                .await;
+        }
+    }
 }
 
 /// Whether the install root has a manifest (the CLI validates the prefix).
