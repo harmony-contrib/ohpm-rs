@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use crate::constants::{LOCK_JSON, LATEST, MY_PACKAGE_JSON};
 use crate::error::{OhpmError, Result};
-use crate::install::spec::{is_local_dependency, parse_inner};
+use crate::install::spec::{is_local_dependency, is_protocol_spec, parse_inner};
 
 /// `LockFile.defaultLockJson.ATTENTION`.
 pub const LOCKFILE_ATTENTION: &str =
@@ -182,6 +182,11 @@ impl Serialize for SerializeMeta<'_> {
 /// `PackageLockerManager.relativeSpec` — the lockfile key form of a spec:
 /// local deps become slash-normalized paths relative to the module root.
 pub fn relative_spec(root: &Path, spec: &str) -> String {
+    // Protocol specs (`workspace:`, `ohpm:`, git URLs, pinned commits) never
+    // go through path normalization.
+    if is_protocol_spec(spec) {
+        return spec.to_string();
+    }
     if !is_local_dependency(spec) {
         return spec.to_string();
     }
@@ -316,9 +321,19 @@ impl Locker {
 
     /// `updateLockSpec` — `name@spec` -> `name@pinned`.
     pub fn update_lock_spec(&mut self, name: &str, spec: &str, pinned: &str) {
-        let key = format!("{name}@{spec}");
+        self.update_lock_spec_named(name, name, spec, pinned);
+    }
+
+    /// `updateLockSpec` with separate key/value names — aliases write the
+    /// specifier KEY under the declared name but the VALUE under the real
+    /// package name (`foo@ohpm:bar@^1.0.0` -> `bar@1.2.3`), so the flush
+    /// prune matches the packages key.
+    pub fn update_lock_spec_named(&mut self, key_name: &str, value_name: &str, spec: &str, pinned: &str) {
+        let key = format!("{key_name}@{spec}");
         self.visited_spec_keys.insert(key.clone());
-        self.lockfile.specifiers.insert(key, format!("{name}@{pinned}"));
+        self.lockfile
+            .specifiers
+            .insert(key, format!("{value_name}@{pinned}"));
     }
 
     /// `updateLockPkg` — `name@version` -> package entry.
@@ -566,6 +581,33 @@ mod tests {
         assert_eq!(
             resolve_lock_spec(Path::new("/proj"), "foo@../lib").unwrap(),
             "foo@/lib"
+        );
+    }
+
+    #[test]
+    fn parse_spec_key_protocol_shapes() {
+        // Git URLs with user@host, alias specs with nested @, and values.
+        assert_eq!(
+            parse_spec_key("foo@git+ssh://user@host/repo.git").unwrap(),
+            ("foo".into(), "git+ssh://user@host/repo.git".into())
+        );
+        assert_eq!(
+            parse_spec_key("foo@ohpm:bar@^1.0.0").unwrap(),
+            ("foo".into(), "ohpm:bar@^1.0.0".into())
+        );
+        assert_eq!(parse_spec_key("bar@1.2.3").unwrap(), ("bar".into(), "1.2.3".into()));
+        assert_eq!(
+            parse_spec_key("foo@0123456789abcdef0123456789abcdef01234567").unwrap(),
+            ("foo".into(), "0123456789abcdef0123456789abcdef01234567".into())
+        );
+        assert_eq!(
+            parse_spec_key("foo@workspace:^1.0.0").unwrap(),
+            ("foo".into(), "workspace:^1.0.0".into())
+        );
+        // Scoped names keep the scope on the name side.
+        assert_eq!(
+            parse_spec_key("@ohos/foo@1.2.3").unwrap(),
+            ("foo".into(), "1.2.3".into())
         );
     }
 

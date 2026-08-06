@@ -36,7 +36,12 @@ impl DepType {
 /// The resolved node record (`DepNodeData`).
 #[derive(Debug, Clone, Default)]
 pub struct NodeData {
+    /// The node's own name (the real package name; for aliases/workspace
+    /// deps this is the target/member name).
     pub name: String,
+    /// The declared dependency key when it differs from `name` (aliases,
+    /// workspace alias form). Used for specifier keys and symlinks.
+    pub declared_name: String,
     pub version: String,
     pub actual_name: String,
     pub pinned_spec: String,
@@ -291,6 +296,7 @@ mod tests {
     fn data(name: &str, version: &str, pinned: &str) -> Arc<NodeData> {
         Arc::new(NodeData {
             name: name.to_string(),
+            declared_name: String::new(),
             version: version.to_string(),
             actual_name: name.to_string(),
             pinned_spec: pinned.to_string(),

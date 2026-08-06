@@ -9,6 +9,10 @@ use crate::error::{OhpmError, Result};
 use crate::workspace::resolve_file_spec;
 
 /// The ohpa dependency types (see `OhpaType.js`).
+///
+/// `Git`, `Alias` and `Workspace` are ohpm-rs extensions beyond the reference
+/// (which rejects git specs and has no alias/workspace protocols), mirroring
+/// pnpm/pacquet semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OhpaType {
     /// An exact valid version, e.g. `1.2.3`.
@@ -22,6 +26,15 @@ pub enum OhpaType {
     File,
     /// A local source-code directory.
     SourceCode,
+    /// A git repository (`git+https://...`, scp-style, `https://...git`),
+    /// pinned by commit.
+    Git,
+    /// A package alias (`ohpm:<real-package>@<spec>`); the dependency key is
+    /// the local name, the target is the real package.
+    Alias,
+    /// The workspace protocol (`workspace:*|^|~|range`), resolved against
+    /// `ohpm-workspace.yaml` members.
+    Workspace,
 }
 
 /// A parsed dependency spec (mirrors `OhpaResult.js`).
@@ -44,6 +57,10 @@ pub struct Spec {
     pub save_spec: String,
     /// The specifier used for resolution ("latest" | raw spec | absolute path).
     pub fetch_spec: String,
+    /// `OhpaType::Alias` only: the real package name behind `ohpm:` (e.g.
+    /// "bar" for `foo@ohpm:bar@^1.0.0`). Resolution, store dirs and lockfile
+    /// package keys use the target; the specifier key and symlink use `name`.
+    pub alias_target: Option<String>,
 }
 
 impl Spec {
@@ -52,13 +69,13 @@ impl Spec {
     }
 }
 
-/// `Ohpa.isURL` — `git+<protocol>:` URLs are rejected.
-fn is_git_url(raw: &str) -> bool {
+/// `Ohpa.isURL` — `git+<protocol>:` URLs (accepted as git specs in ohpm-rs).
+pub fn is_git_url(raw: &str) -> bool {
     raw.to_ascii_lowercase().starts_with("git+") && raw[4..].contains(':')
 }
 
-/// `Ohpa.isGit` — scp-like `user@host:path` strings are rejected.
-fn is_git_scp(raw: &str) -> bool {
+/// `Ohpa.isGit` — scp-like `user@host:path` strings (accepted as git specs).
+pub fn is_git_scp(raw: &str) -> bool {
     // /^[^@]+@[^:.]+\.[^:]+:.+$/
     let Some(rest) = raw.split_once('@') else {
         return false;
@@ -70,6 +87,31 @@ fn is_git_scp(raw: &str) -> bool {
         return false;
     };
     host.contains('.') && !host.contains(':') && !path.is_empty()
+}
+
+/// A git spec: `git+<protocol>:` URLs, scp-style `user@host:path`, or an
+/// http(s) URL whose path ends in `.git` (pnpm's plain-URL rule).
+pub fn is_git_spec(raw: &str) -> bool {
+    is_git_url(raw)
+        || is_git_scp(raw)
+        || url::Url::parse(raw)
+            .map(|u| u.path().ends_with(".git") || u.path().ends_with(".git/"))
+            .unwrap_or(false)
+}
+
+/// A protocol spec that must never be treated as a local path or a registry
+/// range: `workspace:`, `ohpm:`, git URLs and pinned git commits.
+pub fn is_protocol_spec(spec: &str) -> bool {
+    spec.starts_with(crate::constants::WORKSPACE_PREFIX)
+        || spec.starts_with(crate::constants::ALIAS_PREFIX)
+        || is_git_spec(spec)
+        || is_git_pinned(spec)
+}
+
+/// A git *pinned* store key: a 40-hex commit, optionally with a `&path:` dir.
+pub fn is_git_pinned(spec: &str) -> bool {
+    let core = spec.split("&path:").next().unwrap_or(spec);
+    core.len() == 40 && core.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// `Ohpa.isLocalDependency` — the parse-time variant used to decide whether a
@@ -98,6 +140,12 @@ pub fn is_inner_pkg_dependency(spec: &str) -> bool {
 /// parse-time one: it also accepts `file:`-protocol strings and rejects plain
 /// URLs like `https://...`).
 pub fn is_local_dependency(spec: &str) -> bool {
+    // Protocol specs (`workspace:^1.0.0`, `git+...`, pinned git commits) are
+    // never local paths — without this they would be misclassified by the
+    // path/URL checks below and corrupt store-dir names and lockfile keys.
+    if is_protocol_spec(spec) {
+        return false;
+    }
     spec != LATEST
         && !is_valid_range(spec)
         && (!is_valid_url(spec)
@@ -142,12 +190,19 @@ pub fn parse_dependency(raw: &str, where_dir: &Path) -> Result<Spec> {
 }
 
 /// `Ohpa.parse` — the unwrapped parse (mirrors the exact error taxonomy).
+///
+/// Protocol specs (git / `ohpm:` alias / `workspace:`) are detected before
+/// the name@spec split: an unnamed git spec (`git+https://host/repo`) is the
+/// whole raw string, while named forms (`foo@git+ssh://user@host/repo`,
+/// `foo@ohpm:bar@^1.0.0`) split on the first `@` as usual.
 pub fn parse_inner(raw: &str, where_dir: &Path) -> Result<Spec> {
-    if is_git_url(raw) || is_git_scp(raw) {
-        return Err(OhpmError::ohpa_pkg_invalid());
-    }
     let mut name = String::new();
     let mut raw_spec = String::new();
+    if is_git_spec(raw) {
+        // Unnamed git dependency: the whole string is the spec.
+        raw_spec = raw.to_string();
+        return resolve(name, raw_spec, where_dir, raw);
+    }
     // The name@spec separator: the second "@" for scoped names (a scoped name
     // itself starts with "@"), the first otherwise. The separator index in
     // `raw` is `i`; the name is `raw[..i]` and the spec is `raw[i + 1..]`
@@ -184,6 +239,7 @@ fn resolve(name: String, raw_spec: String, where_dir: &Path, raw: &str) -> Resul
         ohpa_type: OhpaType::Range,
         save_spec: String::new(),
         fetch_spec: String::new(),
+        alias_target: None,
     };
     if !spec.name.is_empty() {
         spec.escaped_name = spec.name.replacen('/', "%2f", 1);
@@ -196,8 +252,19 @@ fn resolve(name: String, raw_spec: String, where_dir: &Path, raw: &str) -> Resul
             String::new()
         };
     }
-    if !spec.raw_spec.is_empty()
-        && !is_tag_dependency(&spec.raw_spec)
+    if spec.raw_spec.is_empty() {
+        return from_registry(&mut spec).map(|_| spec);
+    }
+    // Protocol specs are detected before the local/registry split (in
+    // particular `ohpm:...` would otherwise be grabbed by the inner-pkg
+    // branch of `from_file`).
+    if spec.raw_spec.starts_with(crate::constants::WORKSPACE_PREFIX) {
+        from_workspace(&mut spec);
+    } else if spec.raw_spec.starts_with(crate::constants::ALIAS_PREFIX) {
+        from_alias(&mut spec)?;
+    } else if is_git_spec(&spec.raw_spec) {
+        from_git(&mut spec);
+    } else if !is_tag_dependency(&spec.raw_spec)
         && (is_local_spec(&spec.raw_spec) || is_inner_pkg_dependency(&spec.raw_spec))
     {
         from_file(&mut spec);
@@ -205,6 +272,54 @@ fn resolve(name: String, raw_spec: String, where_dir: &Path, raw: &str) -> Resul
         from_registry(&mut spec)?;
     }
     Ok(spec)
+}
+
+/// `ohpm:` alias — `ohpm:<real-package>[@<spec>]`. The dependency key (`name`)
+/// is the local alias; `alias_target` carries the real package name.
+fn from_alias(spec: &mut Spec) -> Result<()> {
+    let inner = &spec.raw_spec[crate::constants::ALIAS_PREFIX.len()..];
+    let sep = if inner.starts_with('@') {
+        inner[1..].find('@').map(|i| i + 1)
+    } else {
+        inner.find('@')
+    }
+    .unwrap_or(0);
+    let target = if sep > 0 { &inner[..sep] } else { inner };
+    let target_spec = if sep > 0 { &inner[sep + 1..] } else { "" };
+    if target.is_empty() || !is_registry_spec(target_spec) {
+        return Err(OhpmError::alias_pkg_invalid(&spec.raw));
+    }
+    validate_name(target)?;
+    spec.ohpa_type = OhpaType::Alias;
+    spec.alias_target = Some(target.to_string());
+    spec.save_spec = spec.raw_spec.clone();
+    spec.fetch_spec = spec.raw_spec.clone();
+    Ok(())
+}
+
+/// `workspace:` protocol — `workspace:*|^|~|<range>|./path|<member>@*`.
+fn from_workspace(spec: &mut Spec) {
+    spec.ohpa_type = OhpaType::Workspace;
+    spec.save_spec = spec.raw_spec.clone();
+    spec.fetch_spec = spec.raw_spec.clone();
+}
+
+/// A git spec — `git+<protocol>:...`, scp-style, or `https://...git`.
+fn from_git(spec: &mut Spec) {
+    spec.ohpa_type = OhpaType::Git;
+    spec.save_spec = spec.raw_spec.clone();
+    spec.fetch_spec = spec.raw_spec.clone();
+}
+
+/// Whether a string is a registry spec (version/range/tag) as required by the
+/// `ohpm:` alias inner spec.
+fn is_registry_spec(spec: &str) -> bool {
+    if spec.is_empty() {
+        return false;
+    }
+    node_semver::Version::parse(spec).is_ok()
+        || node_semver::Range::parse(spec).is_ok()
+        || is_tag_dependency(spec)
 }
 
 /// `Ohpa.fromFile` — local artifact / source-code specs. The fetch spec is the
@@ -472,7 +587,6 @@ mod tests {
 
     #[test]
     fn invalid_inputs() {
-        assert!(parse_inner("git+https://x/y", Path::new("/proj")).is_err());
         // "foo@" parses as foo@latest in the reference (empty spec).
         let s = parse_inner("foo@", Path::new("/proj")).unwrap();
         assert_eq!(s.name, "foo");
@@ -507,9 +621,6 @@ mod tests {
         let err = parse_inner("foo@1.2.3&x", Path::new("/proj")).unwrap_err();
         assert_eq!(err.code, "OhpaSpecUri");
 
-        // Wrapped by parse_dependency.
-        let err = parse_dependency("git+https://x/y", Path::new("/proj")).unwrap_err();
-        assert_eq!(err.code, "ParseDependencyFailed");
     }
 
     #[test]
@@ -554,5 +665,128 @@ mod tests {
         assert_eq!(encode_uri_component("a b"), "a%20b");
         assert_eq!(encode_uri_component("@ohos"), "%40ohos");
         assert_eq!(encode_uri_component("a/b"), "a%2Fb");
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+
+    fn parse(raw: &str) -> Spec {
+        parse_inner(raw, Path::new("/proj")).expect("parse")
+    }
+
+    #[test]
+    fn git_specs() {
+        // Unnamed git specs: the whole string is the spec.
+        let s = parse("git+https://host/repo.git");
+        assert_eq!(s.name, "");
+        assert_eq!(s.ohpa_type, OhpaType::Git);
+        assert_eq!(s.fetch_spec, "git+https://host/repo.git");
+
+        let s = parse("git+ssh://user@host/repo.git#main");
+        assert_eq!(s.ohpa_type, OhpaType::Git);
+        assert_eq!(s.fetch_spec, "git+ssh://user@host/repo.git#main");
+
+        let s = parse("git+file:///abs/repo.git#v1.0.0");
+        assert_eq!(s.ohpa_type, OhpaType::Git);
+
+        // Named forms split on the first @.
+        let s = parse("foo@git+ssh://user@host/repo.git");
+        assert_eq!(s.name, "foo");
+        assert_eq!(s.ohpa_type, OhpaType::Git);
+        assert_eq!(s.fetch_spec, "git+ssh://user@host/repo.git");
+
+        let s = parse("@ohos/foo@git+https://host/repo.git#semver:^1.0.0");
+        assert_eq!(s.name, "@ohos/foo");
+        assert_eq!(s.scope, "@ohos");
+        assert_eq!(s.ohpa_type, OhpaType::Git);
+
+        // Plain https URL ending in .git.
+        let s = parse("https://github.com/user/repo.git");
+        assert_eq!(s.ohpa_type, OhpaType::Git);
+
+        // scp-style.
+        let s = parse("git@github.com:user/repo.git");
+        assert_eq!(s.ohpa_type, OhpaType::Git);
+
+        // Plain URL without .git is not a git spec (falls into the existing
+        // local-path logic, like the reference).
+        let s = parse("foo@https://host/repo");
+        assert_eq!(s.ohpa_type, OhpaType::SourceCode);
+    }
+
+    #[test]
+    fn alias_specs() {
+        let s = parse("foo@ohpm:bar@^1.0.0");
+        assert_eq!(s.name, "foo");
+        assert_eq!(s.ohpa_type, OhpaType::Alias);
+        assert_eq!(s.alias_target.as_deref(), Some("bar"));
+        assert_eq!(s.fetch_spec, "ohpm:bar@^1.0.0");
+        assert_eq!(s.save_spec, "ohpm:bar@^1.0.0");
+
+        let s = parse("foo@ohpm:@ohos/bar@1.2.3");
+        assert_eq!(s.alias_target.as_deref(), Some("@ohos/bar"));
+        assert_eq!(s.ohpa_type, OhpaType::Alias);
+
+        let s = parse("foo@ohpm:bar@tag:beta");
+        assert_eq!(s.ohpa_type, OhpaType::Alias);
+
+        // Bare alias without a spec is invalid.
+        let err = parse_inner("foo@ohpm:bar", Path::new("/proj")).unwrap_err();
+        assert_eq!(err.code, "AliasPkgInvalid");
+
+        // Nested protocols are rejected.
+        let err = parse_inner("foo@ohpm:git+https://x/y", Path::new("/proj")).unwrap_err();
+        assert_eq!(err.code, "AliasPkgInvalid");
+        let err = parse_inner("foo@ohpm:workspace:*", Path::new("/proj")).unwrap_err();
+        assert_eq!(err.code, "AliasPkgInvalid");
+    }
+
+    #[test]
+    fn workspace_specs() {
+        for spec in [
+            "workspace:*",
+            "workspace:",
+            "workspace:^",
+            "workspace:~",
+            "workspace:^1.5.0",
+            "workspace:1.5.0",
+            "workspace:./foo",
+            "workspace:../foo",
+            "workspace:foo@*",
+        ] {
+            let s = parse(&format!("bar@{spec}"));
+            assert_eq!(s.name, "bar", "{spec}");
+            assert_eq!(s.ohpa_type, OhpaType::Workspace, "{spec}");
+            assert_eq!(s.fetch_spec, spec);
+            assert_eq!(s.save_spec, spec);
+        }
+    }
+
+    #[test]
+    fn predicates() {
+        assert!(is_git_spec("git+https://x/y"));
+        assert!(is_git_spec("git@github.com:user/repo.git"));
+        assert!(is_git_spec("https://host/repo.git"));
+        assert!(!is_git_spec("https://host/repo"));
+        assert!(!is_git_spec("^1.0.0"));
+
+        assert!(is_protocol_spec("workspace:^1.0.0"));
+        assert!(is_protocol_spec("ohpm:bar@^1.0.0"));
+        assert!(is_protocol_spec("git+https://x/y"));
+        assert!(is_protocol_spec("0123456789abcdef0123456789abcdef01234567"));
+        assert!(!is_protocol_spec("^1.0.0"));
+        assert!(!is_protocol_spec("../lib"));
+
+        assert!(is_git_pinned("0123456789abcdef0123456789abcdef01234567"));
+        assert!(is_git_pinned("0123456789abcdef0123456789abcdef01234567&path:sub"));
+        assert!(!is_git_pinned("1.2.3"));
+
+        // Protocol specs are never "local" for store-dir naming.
+        assert!(!is_local_dependency("workspace:^1.0.0"));
+        assert!(!is_local_dependency("git+https://x/y"));
+        assert!(!is_local_dependency("0123456789abcdef0123456789abcdef01234567"));
+        assert!(!is_local_dependency("ohpm:bar@^1.0.0"));
     }
 }

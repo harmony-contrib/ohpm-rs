@@ -61,6 +61,71 @@ pub struct Workspace {
     pub version_mode: VersionMode,
 }
 
+/// A parsed `workspace:` spec (mirrors pnpm's workspace protocol grammar).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceQuery {
+    /// `workspace:*` / bare `workspace:` — any local version.
+    Any,
+    /// `workspace:^` — caret against the member's version.
+    Caret,
+    /// `workspace:~` — tilde against the member's version.
+    Tilde,
+    /// An explicit range/version (`workspace:^1.5.0`, `workspace:1.5.0`).
+    Range(String),
+    /// A path form (`workspace:./foo`, `workspace:../foo`).
+    Path(String),
+    /// The alias form (`workspace:foo@*`, `workspace:foo@^1.0.0`).
+    Alias { member: String, range: Option<String> },
+}
+
+impl WorkspaceQuery {
+    pub fn parse(spec: &str) -> WorkspaceQuery {
+        let rest = spec
+            .strip_prefix(crate::constants::WORKSPACE_PREFIX)
+            .unwrap_or(spec);
+        match rest {
+            "" | "*" => WorkspaceQuery::Any,
+            "^" => WorkspaceQuery::Caret,
+            "~" => WorkspaceQuery::Tilde,
+            _ if rest.starts_with('.') => WorkspaceQuery::Path(rest.to_string()),
+            _ => {
+                if let Some((member, range)) = rest.split_once('@') {
+                    WorkspaceQuery::Alias {
+                        member: member.to_string(),
+                        range: Some(range.to_string()),
+                    }
+                } else {
+                    WorkspaceQuery::Range(rest.to_string())
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a workspace query against a member version (pnpm semantics:
+/// `*`/`^`/`~` pick the version including prereleases; explicit ranges go
+/// through max-satisfying).
+pub fn resolve_workspace_version(
+    query: &WorkspaceQuery,
+    member_version: &str,
+    name: &str,
+    _spec: &str,
+) -> Result<String> {
+    match query {
+        WorkspaceQuery::Any | WorkspaceQuery::Caret | WorkspaceQuery::Tilde => {
+            Ok(member_version.to_string())
+        }
+        WorkspaceQuery::Alias { range: None, .. } => Ok(member_version.to_string()),
+        WorkspaceQuery::Range(range) | WorkspaceQuery::Alias { range: Some(range), .. } => {
+            crate::install::semver::semver_max_satisfying(&[member_version.to_string()], range)
+                .ok_or_else(|| {
+                    OhpmError::workspace_no_matching_version(name, range, member_version)
+                })
+        }
+        WorkspaceQuery::Path(_) => Ok(member_version.to_string()),
+    }
+}
+
 impl Workspace {
     /// Find the nearest workspace root walking up from `dir`. Returns
     /// `Ok(None)` when `dir` is not inside a workspace.
@@ -384,6 +449,111 @@ pub fn process_file_dependencies(
     manifest.dev_dependencies = process_deps(ws, package_root, &dev, false, &mut rewritten)?;
 
     Ok(rewritten)
+}
+
+/// Rewrite `workspace:` dependencies for publishing, mirroring pnpm's
+/// `exportable-manifest` replace table:
+///
+/// | declared | published (member at X.Y.Z) |
+/// |---|---|
+/// | `workspace:*` / `workspace:` | exact version |
+/// | `workspace:^` | `^X.Y.Z` |
+/// | `workspace:~` | `~X.Y.Z` |
+/// | `workspace:<range>` | kept verbatim |
+/// | `workspace:./dir` | exact version |
+/// | `workspace:<member>@*` | `ohpm:<member>@X.Y.Z` |
+pub fn process_workspace_dependencies(
+    ws: &Workspace,
+    _package_root: &Path,
+    manifest: &mut Manifest,
+) -> Result<usize> {
+    let mut rewritten = 0usize;
+    let deps = std::mem::take(&mut manifest.dependencies);
+    manifest.dependencies = process_workspace_deps(ws, &deps, true, &mut rewritten)?;
+    let dev = std::mem::take(&mut manifest.dev_dependencies);
+    manifest.dev_dependencies = process_workspace_deps(ws, &dev, false, &mut rewritten)?;
+    let dynamic = std::mem::take(&mut manifest.dynamic_dependencies);
+    manifest.dynamic_dependencies = process_workspace_deps(ws, &dynamic, true, &mut rewritten)?;
+    Ok(rewritten)
+}
+
+fn process_workspace_deps(
+    ws: &Workspace,
+    deps: &BTreeMap<String, String>,
+    _strict: bool,
+    rewritten: &mut usize,
+) -> Result<BTreeMap<String, String>> {
+    let _ = (ws, _strict);
+    let members = ws.members_by_name();
+    let mut out = BTreeMap::new();
+    for (name, spec) in deps {
+        let Some(rest) = spec.strip_prefix(crate::constants::WORKSPACE_PREFIX) else {
+            out.insert(name.clone(), spec.clone());
+            continue;
+        };
+        let version = match rest {
+            "" | "*" => replace_workspace(name, spec, rest, ws, &members, false, None)?,
+            "^" => replace_workspace(name, spec, rest, ws, &members, false, Some("^"))?,
+            "~" => replace_workspace(name, spec, rest, ws, &members, false, Some("~"))?,
+            _ if rest.starts_with('.') => {
+                // Path form: resolve the member's exact version.
+                let resolved = resolve_file_spec(
+                    ws.root.as_path(),
+                    &format!("file:{}", rest.trim_start_matches("./")),
+                );
+                let member = ws
+                    .members
+                    .iter()
+                    .find(|m| m.dir == resolved || resolved.starts_with(&m.dir))
+                    .ok_or_else(|| OhpmError::workspace_pkg_not_found(name, spec))?;
+                member.manifest.version.clone()
+            }
+            _ => {
+                if let Some((member, range)) = rest.split_once('@') {
+                    let m = members
+                        .get(member)
+                        .copied()
+                        .ok_or_else(|| OhpmError::workspace_pkg_not_found(member, spec))?;
+                    let v = m.manifest.version.clone();
+                    match range {
+                        "*" | "" => format!("ohpm:{member}@{v}"),
+                        r => format!("ohpm:{member}@{r}"),
+                    }
+                } else {
+                    // Explicit range: kept verbatim (pnpm parity).
+                    format!("workspace:{rest}")
+                }
+            }
+        };
+        if version == *spec {
+            out.insert(name.clone(), spec.clone());
+            continue;
+        }
+        out.insert(name.clone(), version);
+        *rewritten += 1;
+    }
+    Ok(out)
+}
+
+fn replace_workspace(
+    name: &str,
+    spec: &str,
+    _rest: &str,
+    _ws: &Workspace,
+    members: &BTreeMap<&str, &Member>,
+    _strict: bool,
+    prefix: Option<&str>,
+) -> Result<String> {
+    let member = members
+        .get(name)
+        .copied()
+        .ok_or_else(|| OhpmError::workspace_pkg_not_found(name, spec))?;
+    let v = member.manifest.version.clone();
+    Ok(match prefix {
+        Some("^") => format!("^{v}"),
+        Some("~") => format!("~{v}"),
+        _ => v,
+    })
 }
 
 fn process_deps(

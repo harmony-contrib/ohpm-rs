@@ -326,6 +326,35 @@ async fn extract_to_store(
     .map_err(|e| OhpmError::install_pkg_to_local_failed().with_detail(&e.to_string()))?
 }
 
+/// Git deps: the resolution phase already materialized the checkout into the
+/// store dir — this is an idempotent no-op (a crash between phases re-runs
+/// the materialization).
+async fn install_git_node(ctx: &StoreContext, node: &Node) -> Result<()> {
+    let store_dir = node.data.resolve_pkg_store_dir(&ctx.project_root);
+    if store_dir.join(crate::constants::MY_PACKAGE_JSON).is_file() {
+        return Ok(());
+    }
+    // Store missing — re-materialize the pinned commit via the clone path.
+    let url = node.data.resolved.split('#').next().unwrap_or(&node.data.resolved).to_string();
+    let commit = node.data.pinned_spec.clone();
+    let tmp = ctx
+        .project_root
+        .join(MY_MODULES)
+        .join(TMP_DIR_NAME)
+        .join(format!("git-{}", uuid::Uuid::new_v4().simple()));
+    let sem = Arc::new(Semaphore::new(ctx.max_concurrent));
+    let _permit = sem.acquire().await.map_err(|_| OhpmError::install_pkg_to_local_failed())?;
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(tmp.parent().unwrap())?;
+        let repo = crate::install::git::fetch_repo(&url, &tmp)?;
+        crate::install::git::materialize_commit_in(&repo, &commit, None, &store_dir)?;
+        let _ = std::fs::remove_dir_all(&tmp);
+        Ok::<(), OhpmError>(())
+    })
+    .await
+    .map_err(|e| OhpmError::install_pkg_to_local_failed().with_detail(&e.to_string()))?
+}
+
 /// `installSourceCodeArtifactDep` — linked source code is a no-op; otherwise
 /// copy the source dir (excluding node_modules/oh_modules/build).
 async fn install_source_code_node(ctx: &StoreContext, node: &Node) -> Result<()> {
@@ -388,12 +417,14 @@ async fn install_dependency(ctx: &StoreContext, node: &Node) -> Result<()> {
                 crate::install::spec::OhpaType::File => {
                     install_local_artifact_node(ctx, node).await
                 }
+                crate::install::spec::OhpaType::Git => install_git_node(ctx, node).await,
+                crate::install::spec::OhpaType::Workspace => Ok(()), // link only
                 _ => install_registry_node(ctx, node).await,
             }
         })
         .await;
     ctx.install_promises.lock().await.remove(&store_dir);
-    if result.is_ok() {
+    if result.is_ok() && node.data.registry_type != "workspace" {
         ctx.installed.fetch_add(1, Ordering::SeqCst);
         log::info!(
             "place package done: {}@{} to {}",
@@ -467,6 +498,7 @@ mod tests {
     fn node_data(name: &str, version: &str, pinned: &str) -> NodeData {
         NodeData {
             name: name.to_string(),
+            declared_name: String::new(),
             version: version.to_string(),
             actual_name: name.to_string(),
             pinned_spec: pinned.to_string(),

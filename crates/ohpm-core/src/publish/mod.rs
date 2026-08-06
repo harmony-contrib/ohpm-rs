@@ -210,13 +210,15 @@ async fn validate_and_prepare(
     let mut rewritten_deps = 0usize;
     if let Some(ws) = crate::workspace::Workspace::find(&package_root)? {
         let n = crate::workspace::process_file_dependencies(&ws, &package_root, &mut manifest)?;
-        if n > 0 {
+        let n2 = crate::workspace::process_workspace_dependencies(&ws, &package_root, &mut manifest)?;
+        let total = n + n2;
+        if total > 0 {
             log::info!(
-                "workspace mode: rewrote {n} file: dependencies in \"{}\"",
+                "workspace mode: rewrote {total} file:/workspace: dependencies in \"{}\"",
                 manifest.name
             );
         }
-        rewritten_deps = n;
+        rewritten_deps = total;
     }
 
     // 3b. When the workspace rewrite changed the dependencies, the packaged

@@ -27,7 +27,11 @@ pub enum InstallCommand {
 
 /// `PackageUtil.parse` — the name/version split used by the update/uninstall
 /// argument validation (the last `@` splits; scoped names keep their scope).
+/// Protocol specs (git URLs with `user@host`, aliases) are not versions.
 pub fn parse_cli_pkg_version(raw: &str) -> Option<String> {
+    if crate::install::spec::is_protocol_spec(raw) {
+        return None;
+    }
     let n = raw.rfind('@').unwrap_or(0);
     (n > 0).then(|| raw[n + 1..].to_string())
 }

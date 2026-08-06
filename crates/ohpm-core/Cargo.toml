@@ -20,6 +20,7 @@ json5.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 node-semver.workspace = true
+gix.workspace = true
 reqwest.workspace = true
 tar.workspace = true
 flate2.workspace = true

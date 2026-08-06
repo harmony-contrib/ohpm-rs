@@ -53,6 +53,21 @@ A cargo workspace with two crates:
   clears/deletes the matching lockfile specifiers before re-resolving, and
   `uninstall` drops the packages from the root requirements and rewrites the
   manifest.
+
+Protocol extensions beyond the reference (which rejects them), mirroring
+pnpm/pacquet:
+
+- **git specs** (`install/git.rs`): `git+https://...`, scp-style and
+  `https://...git` URLs with `#commit|branch|tag|semver:<range>|path:<dir>`
+  fragments; the commit is pinned in the lockfile and re-installs work with
+  the fixture repo deleted. Pure-Rust via the gix crate (no system git).
+- **`ohpm:` aliases**: `"foo": "ohpm:bar@^1.0.0"` installs bar under the
+  alias key foo; the specifier keeps the alias, the packages key and the
+  store dir use the real name.
+- **`workspace:` protocol**: `workspace:*|^|~|<range>|./path|<member>@*`
+  resolves against `ohpm-workspace.yaml` members as links; the publish flow
+  rewrites them to versions (`^`/`~` prefixes kept, alias form becomes
+  `ohpm:<member>@<version>`).
 - **`crates/ohpm-cli`** — the `ohpm-rs` binary: clap command definitions and thin
   command handlers.
 
@@ -63,7 +78,7 @@ installation (`config/`, `core/registry/`, `core/publish/`, `core/package/`).
 
 ```sh
 cargo build --workspace        # binary: target/debug/ohpm-rs
-cargo test  --workspace        # 140 tests: unit + mock-registry integration
+cargo test  --workspace        # 153 tests: unit + mock-registry integration
 ```
 
 ## Environment-variable authentication (CI)

@@ -250,6 +250,72 @@ impl OhpmError {
 
     // ---- install ----------------------------------------------------------
 
+    pub fn git_ls_remote_failed(repo: &str, detail: &str) -> Self {
+        Self::new(
+            "GitLsRemoteFailed",
+            format!("Failed to list references of git repository \"{repo}\": {detail}"),
+        )
+    }
+
+    pub fn git_ambiguous_ref(repo: &str, prefix: &str, count: usize) -> Self {
+        Self::new(
+            "GitAmbiguousRef",
+            format!(
+                "The short commit \"{prefix}\" of repository \"{repo}\" matches {count} commits; use a longer prefix or an exact commit."
+            ),
+        )
+    }
+
+    pub fn git_ref_not_found(repo: &str, spec: &str) -> Self {
+        Self::new(
+            "GitRefNotFound",
+            format!("Could not resolve \"{spec}\" to a commit of \"{repo}\"."),
+        )
+    }
+
+    pub fn git_semver_no_match(repo: &str, range: &str) -> Self {
+        Self::new(
+            "GitSemverNoMatch",
+            format!("Could not resolve \"{range}\" to a commit of \"{repo}\"."),
+        )
+    }
+
+    pub fn git_checkout_failed(repo: &str, commit: &str, detail: &str) -> Self {
+        Self::new(
+            "GitCheckoutFailed",
+            format!(
+                "Failed to materialize commit \"{commit}\" of \"{repo}\": {detail}"
+            ),
+        )
+    }
+
+    pub fn alias_pkg_invalid(raw: &str) -> Self {
+        Self::new(
+            "AliasPkgInvalid",
+            format!(
+                "Invalid alias \"{raw}\": the alias target must be \"ohpm:<pkg>[@<version|range|tag>]\" with a registry spec."
+            ),
+        )
+    }
+
+    pub fn workspace_pkg_not_found(name: &str, spec: &str) -> Self {
+        Self::new(
+            "WorkspacePkgNotFound",
+            format!(
+                "\"{name}\" (declared \"{spec}\") is in the dependencies but no package named \"{name}\" is present in the workspace."
+            ),
+        )
+    }
+
+    pub fn workspace_no_matching_version(name: &str, range: &str, versions: &str) -> Self {
+        Self::new(
+            "WorkspaceNoMatchingVersion",
+            format!(
+                "No version of \"{name}\" in the workspace matches \"{range}\". Available versions: {versions}"
+            ),
+        )
+    }
+
     pub fn update_has_version(version: &str) -> Self {
         Self::new(
             "UpdateHasVersion",

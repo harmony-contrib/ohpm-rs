@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::config::Config;
 use crate::error::{OhpmError, Result};
 use crate::install::lockfile::{relative_spec, LockPkg, Locker};
+use crate::constants::MY_MODULES;
 use crate::install::node::{
     file_content_hash, file_path_hash, pkg_store_dir_name, NodeData,
 };
@@ -31,6 +32,9 @@ pub struct Resolver {
     pub client: RegistryClient,
     pub config: Config,
     pub project_root: PathBuf,
+    /// The enclosing workspace (None outside one); used by the workspace
+    /// protocol.
+    pub workspace: Option<crate::workspace::Workspace>,
     pub cli_input_names: std::sync::Mutex<Vec<String>>,
     pub packument_cache: PackumentCache,
     lockers: Mutex<HashMap<PathBuf, Locker>>,
@@ -59,11 +63,17 @@ impl Default for InFlight {
 }
 
 impl Resolver {
-    pub fn new(client: RegistryClient, config: Config, project_root: PathBuf) -> Self {
+    pub fn new(
+        client: RegistryClient,
+        config: Config,
+        project_root: PathBuf,
+        workspace: Option<crate::workspace::Workspace>,
+    ) -> Self {
         Resolver {
             client,
             config,
             project_root,
+            workspace,
             cli_input_names: std::sync::Mutex::new(Vec::new()),
             packument_cache: PackumentCache::default(),
             lockers: Mutex::new(HashMap::new()),
@@ -224,6 +234,7 @@ impl Resolver {
             Ok(node) => Ok(node),
             Err(e) => Ok(Arc::new(NodeData {
                 name: name.to_string(),
+                declared_name: String::new(),
                 version: String::new(),
                 actual_name: String::new(),
                 pinned_spec: String::new(),
@@ -266,13 +277,33 @@ impl Resolver {
             })
             .await;
         if let Some(value) = &lock_value {
-            parsed = parse_dependency(value, where_dir)?;
-            if let Some(mut pack) =
-                self.try_lockfile_packument(root_dir, name, &original.fetch_spec, &parsed).await?
+            // Protocol specs resolve via their own fetch arms: the lockfile
+            // value re-parse is only meaningful for registry deps (a pinned
+            // git SHA re-parses as a Tag or SourceCode and would mis-dispatch
+            // the fall-through).
+            if !matches!(
+                original.ohpa_type,
+                OhpaType::Git | OhpaType::Workspace | OhpaType::File | OhpaType::SourceCode
+            ) {
+                parsed = parse_dependency(value, where_dir)?;
+            }
+            if let Some(mut pack) = self
+                .try_lockfile_packument(root_dir, name, &original.fetch_spec, original, &parsed)
+                .await?
             {
                 // `checkAndReassignResolvedField` — re-fetch when the locked
-                // entry lacks resolved/integrity.
-                if pack.versions.values().next().is_some_and(|v| v.resolved.is_empty() || v.integrity.is_none()) {
+                // entry lacks resolved/integrity. Registry deps only: git
+                // entries carry no integrity (they are pinned by commit) and
+                // workspace entries resolve to member dirs.
+                let needs_reassign = matches!(
+                    original.ohpa_type,
+                    OhpaType::Range | OhpaType::Version | OhpaType::Tag | OhpaType::Alias
+                ) && pack
+                    .versions
+                    .values()
+                    .next()
+                    .is_some_and(|v| v.resolved.is_empty() || v.integrity.is_none());
+                if needs_reassign {
                     self.with_locker(root_dir, |locker| {
                         locker.delete_specifier(&format!(
                             "{name}@{}",
@@ -280,7 +311,9 @@ impl Resolver {
                         ));
                     })
                     .await;
-                    let fresh = self.fetch_with_implementor(name, where_dir, &parsed).await?;
+                    let fresh = self
+                        .fetch_with_implementor(root_dir, name, where_dir, &parsed)
+                        .await?;
                     let first = pack.versions.keys().next().cloned().unwrap_or_default();
                     if let Some(meta) = pack.versions.get_mut(&first) {
                         if let Some(fresh_meta) = fresh.versions.get(&first) {
@@ -298,23 +331,188 @@ impl Resolver {
             }
         }
         let packument = self
-            .fetch_with_implementor(name, where_dir, &parsed)
+            .fetch_with_implementor(root_dir, name, where_dir, &parsed)
             .await?;
         self.build_dep_node_data(name, original, &parsed, &packument, is_link, is_shared).await
     }
 
-    /// `tryFetchFromLockFile` — build a lockfile-derived packument for
-    /// registry types; File needs the (deferred) mtime cache and SourceCode is
-    /// never lockfile-first. `Ok(None)` falls through to the implementor.
+    /// `ohpm:` alias — resolve the TARGET package; the alias key is handled by
+    /// `build_dep_node_data` (declared_name) and the lockfile writer.
+    async fn fetch_alias_dep(&self, parsed: &Spec) -> Result<Packument> {
+        let target = parsed
+            .alias_target
+            .as_deref()
+            .ok_or_else(|| OhpmError::alias_pkg_invalid(&parsed.raw))?;
+        let inner = &parsed.fetch_spec[crate::constants::ALIAS_PREFIX.len()..];
+        let sep = if inner.starts_with('@') {
+            inner[1..].find('@').map(|i| i + 1)
+        } else {
+            inner.find('@')
+        }
+        .unwrap_or(0);
+        let inner_spec = if sep > 0 { &inner[sep + 1..] } else { "" };
+        fetch_packument(
+            &self.client,
+            &self.config,
+            target,
+            inner_spec,
+            &self.packument_cache,
+        )
+        .await
+    }
+
+    /// `workspace:` — resolve against the `ohpm-workspace.yaml` members.
+    fn fetch_workspace_dep(&self, name: &str, parsed: &Spec) -> Result<Packument> {
+        let spec = parsed.fetch_spec.clone();
+        let query = crate::workspace::WorkspaceQuery::parse(&spec);
+        let ws = self
+            .workspace
+            .as_ref()
+            .ok_or_else(|| OhpmError::workspace_pkg_not_found(name, &spec))?;
+        // Path forms resolve by directory; everything else by member name.
+        let member = match &query {
+            crate::workspace::WorkspaceQuery::Path(p) => {
+                let resolved = crate::workspace::resolve_file_spec(
+                    &self.project_root,
+                    &format!("file:{p}"),
+                );
+                ws.members
+                    .iter()
+                    .find(|m| m.dir == resolved)
+                    .ok_or_else(|| OhpmError::workspace_pkg_not_found(name, &spec))?
+            }
+            crate::workspace::WorkspaceQuery::Alias { member, .. } => ws
+                .members_by_name()
+                .get(member.as_str())
+                .copied()
+                .ok_or_else(|| OhpmError::workspace_pkg_not_found(member, &spec))?,
+            _ => ws
+                .members_by_name()
+                .get(name)
+                .copied()
+                .ok_or_else(|| OhpmError::workspace_pkg_not_found(name, &spec))?,
+        };
+        let version = crate::workspace::resolve_workspace_version(&query, &member.manifest.version, name, &spec)?;
+        let meta = VersionMeta {
+            name: member.manifest.name.clone(),
+            version: version.clone(),
+            package_type: member.manifest.package_type.clone(),
+            dependencies: member.manifest.dependencies.clone(),
+            dev_dependencies: member.manifest.dev_dependencies.clone(),
+            dynamic_dependencies: member.manifest.dynamic_dependencies.clone(),
+            resolved: member.dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut versions = BTreeMap::new();
+        versions.insert(version.clone(), meta);
+        Ok(Packument {
+            name: name.to_string(),
+            actual_name: member.manifest.name.clone(),
+            dist_tags: BTreeMap::new(),
+            versions,
+            registry_type: "workspace".to_string(),
+            is_from_lock_file: false,
+            package_type: member.manifest.package_type.clone(),
+        })
+    }
+
+    /// Git spec — clone (or reuse the locked commit), materialize into the
+    /// store, and read the manifest from the checkout.
+    async fn fetch_git_dep(&self, root_dir: &Path, name: &str, parsed: &Spec) -> Result<Packument> {
+        let spec = parsed.fetch_spec.clone();
+        let query = crate::install::git::parse_git_spec(&spec)?;
+        let url = spec.split('#').next().unwrap_or(&spec).to_string();
+
+        // The lockfile may already pin the commit (re-install, no ls-remote).
+        let locked = self
+            .with_locker(root_dir, |locker| {
+                locker.get_lock_spec(name, &relative_spec(root_dir, &spec))
+            })
+            .await;
+        let (commit, manifest) = match locked {
+            Some(value) => {
+                let (_, commit) = crate::install::lockfile::parse_spec_key(&value)
+                    .map_err(|_| OhpmError::locker_invalid_specifier(&value))?;
+                let store_dir = self
+                    .project_root
+                    .join(MY_MODULES)
+                    .join(".ohpm")
+                    .join(pkg_store_dir_name(name, &commit, ""));
+                let pkg_store = store_dir.join("oh_modules").join(name);
+                if !pkg_store.join(crate::constants::MY_PACKAGE_JSON).is_file() {
+                    // Store missing (crash between phases) — re-materialize
+                    // the pinned commit.
+                    let sub = crate::install::git::sub_dir_of(&query);
+                    let tmp = self.project_root.join(MY_MODULES).join(".tmp").join(format!("git-{}", uuid::Uuid::new_v4().simple()));
+                    std::fs::create_dir_all(tmp.parent().unwrap())?;
+                    let repo = crate::install::git::fetch_repo(&url, &tmp)?;
+                    crate::install::git::materialize_commit_in(&repo, &commit, sub, &pkg_store)?;
+                    let _ = std::fs::remove_dir_all(&tmp);
+                }
+                let manifest = read_manifest_from_dir(&pkg_store)?;
+                (commit, manifest)
+            }
+            None => {
+                // Fresh resolution: clone once, resolve the ref locally, and
+                // materialize the pinned commit's tree into the store.
+                let tmp = self.project_root.join(MY_MODULES).join(".tmp").join(format!("git-{}", uuid::Uuid::new_v4().simple()));
+                std::fs::create_dir_all(tmp.parent().unwrap())?;
+                let repo = crate::install::git::fetch_repo(&url, &tmp)?;
+                let commit = crate::install::git::resolve_commit_in(&repo, &query)?;
+                let sub = crate::install::git::sub_dir_of(&query);
+                let commit_key = match sub {
+                    Some(s) => format!("{commit}&path:{s}"),
+                    None => commit.clone(),
+                };
+                let store_dir = self
+                    .project_root
+                    .join(MY_MODULES)
+                    .join(".ohpm")
+                    .join(pkg_store_dir_name(name, &commit_key, ""));
+                let pkg_store = store_dir.join("oh_modules").join(name);
+                crate::install::git::materialize_commit_in(&repo, &commit, sub, &pkg_store)?;
+                let _ = std::fs::remove_dir_all(&tmp);
+                let manifest = read_manifest_from_dir(&pkg_store)?;
+                (commit_key, manifest)
+            }
+        };
+        let meta = VersionMeta {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            package_type: manifest.package_type.clone(),
+            dependencies: manifest.dependencies.clone(),
+            dev_dependencies: manifest.dev_dependencies.clone(),
+            dynamic_dependencies: manifest.dynamic_dependencies.clone(),
+            resolved: format!("{url}#{commit}"),
+            ..Default::default()
+        };
+        let mut versions = BTreeMap::new();
+        versions.insert(commit.clone(), meta);
+        Ok(Packument {
+            name: name.to_string(),
+            actual_name: manifest.name,
+            dist_tags: BTreeMap::new(),
+            versions,
+            registry_type: "git".to_string(),
+            is_from_lock_file: false,
+            package_type: manifest.package_type.clone(),
+        })
+    }
+
+    /// `tryFetchFromLockFile` — build a lockfile-derived packument. Dispatch
+    /// on the ORIGINAL spec type (a git value `foo@<sha>` re-parses as a Tag
+    /// and a workspace value `foo@1.2.3` as a Version — both would otherwise
+    /// fall into the registry branch and miss the lock package).
     async fn try_lockfile_packument(
         &self,
         root_dir: &Path,
         name: &str,
         fetch_spec: &str,
-        parsed: &Spec,
+        original: &Spec,
+        _parsed: &Spec,
     ) -> Result<Option<Packument>> {
-        match parsed.ohpa_type {
-            OhpaType::Range | OhpaType::Version | OhpaType::Tag => {
+        match original.ohpa_type {
+            OhpaType::Range | OhpaType::Version | OhpaType::Tag | OhpaType::Alias => {
                 let Some((value, mut lock_pkg)) = self
                     .with_locker(root_dir, |locker| {
                         locker.get_lock_pkg(name, &relative_spec(root_dir, fetch_spec))
@@ -347,13 +545,59 @@ impl Resolver {
                     package_type: lock_pkg.package_type.clone(),
                 }))
             }
-            OhpaType::File | OhpaType::SourceCode => Ok(None),
+            OhpaType::Git => {
+                let Some((value, _lock_pkg)) = self
+                    .with_locker(root_dir, |locker| {
+                        locker.get_lock_pkg(name, &relative_spec(root_dir, fetch_spec))
+                    })
+                    .await
+                else {
+                    return Ok(None);
+                };
+                let (_, commit) = crate::install::lockfile::parse_spec_key(&value)
+                    .map_err(|_| OhpmError::locker_invalid_specifier(&value))?;
+                // The store dir holds the materialized checkout; read the
+                // manifest from it (no network on re-install).
+                let store_root = self
+                    .project_root
+                    .join(MY_MODULES)
+                    .join(".ohpm");
+                let store_dir = store_root.join(pkg_store_dir_name(name, &commit, ""));
+                let pkg_store = store_dir.join("oh_modules").join(name);
+                if !pkg_store.join(crate::constants::MY_PACKAGE_JSON).is_file() {
+                    return Ok(None); // store missing — re-materialize below
+                }
+                let manifest = read_manifest_from_dir(&pkg_store)?;
+                let meta = VersionMeta {
+                    name: manifest.name.clone(),
+                    version: manifest.version.clone(),
+                    package_type: manifest.package_type.clone(),
+                    dependencies: manifest.dependencies.clone(),
+                    dev_dependencies: manifest.dev_dependencies.clone(),
+                    dynamic_dependencies: manifest.dynamic_dependencies.clone(),
+                    resolved: format!("{}#{}", fetch_spec.split('#').next().unwrap_or(fetch_spec), commit),
+                    ..Default::default()
+                };
+                let mut versions = BTreeMap::new();
+                versions.insert(commit.clone(), meta);
+                Ok(Some(Packument {
+                    name: name.to_string(),
+                    actual_name: manifest.name,
+                    dist_tags: BTreeMap::new(),
+                    versions,
+                    registry_type: "git".to_string(),
+                    is_from_lock_file: true,
+                    package_type: manifest.package_type.clone(),
+                }))
+            }
+            OhpaType::File | OhpaType::SourceCode | OhpaType::Workspace => Ok(None),
         }
     }
 
     /// `fetchWithImplementor` — dispatch by spec type.
     async fn fetch_with_implementor(
         &self,
+        root_dir: &Path,
         name: &str,
         where_dir: &Path,
         parsed: &Spec,
@@ -373,6 +617,9 @@ impl Resolver {
             OhpaType::SourceCode => {
                 self.fetch_source_code(name, parsed, where_dir).await
             }
+            OhpaType::Git => self.fetch_git_dep(root_dir, name, parsed).await,
+            OhpaType::Alias => self.fetch_alias_dep(parsed).await,
+            OhpaType::Workspace => self.fetch_workspace_dep(name, parsed),
         }
     }
 
@@ -461,7 +708,25 @@ impl Resolver {
         is_link: bool,
         is_shared: bool,
     ) -> Result<Arc<NodeData>> {
-        let pinned = get_pinned_version(name, &parsed.fetch_spec, packument)?;
+        let _ = parsed; // the declared spec is re-derived per type below
+        // Alias: resolution uses the TARGET name and inner spec; the declared
+        // name stays on the node for specifier keys and symlinks.
+        let (resolve_name, resolve_spec) = match original.ohpa_type {
+            OhpaType::Alias => {
+                let target = original.alias_target.clone().unwrap_or_else(|| name.to_string());
+                let inner = &original.fetch_spec[crate::constants::ALIAS_PREFIX.len()..];
+                let sep = if inner.starts_with('@') {
+                    inner[1..].find('@').map(|i| i + 1)
+                } else {
+                    inner.find('@')
+                }
+                .unwrap_or(0);
+                let inner_spec = if sep > 0 { &inner[sep + 1..] } else { "" };
+                (target, inner_spec.to_string())
+            }
+            _ => (name.to_string(), parsed.fetch_spec.clone()),
+        };
+        let pinned = get_pinned_version(&resolve_name, &resolve_spec, packument)?;
         // `resolveSaveSpec` — "latest" spec without "latest" in the original
         // pkg string becomes the pinned version.
         let mut save_spec = original.save_spec.clone();
@@ -484,35 +749,58 @@ impl Resolver {
             .cloned()
             .unwrap_or_default();
         let lock_pkg = LockPkg::from_meta(&meta, &packument.registry_type);
-        let pinned_parse = parse_dependency(&format!("{name}@{pinned}"), &original.where_dir)?;
-        let node_name = pinned_parse.name.clone();
+        // Git pinned commits (`<sha>&path:...`) would fail the tag URI check
+        // in a registry re-parse — skip it; alias/workspace use the declared
+        // name as the node name for symlinks and lockfile keys.
+        let (node_name, pinned_parse) = match original.ohpa_type {
+            OhpaType::Git => (name.to_string(), None),
+            OhpaType::Workspace => {
+                (name.to_string(), None)
+            }
+            _ => {
+                let p = parse_dependency(&format!("{resolve_name}@{pinned}"), &original.where_dir)?;
+                (p.name.clone(), Some(p))
+            }
+        };
 
-        let (save_root_dir, pkg_store_dir) = match pinned_parse.ohpa_type {
-            OhpaType::File => {
-                let hash = file_content_hash(Path::new(&pinned_parse.fetch_spec))?;
-                (
-                    pkg_store_dir_name(&node_name, &pinned_parse.fetch_spec, &hash),
-                    format!("oh_modules/{node_name}"),
-                )
+        let (save_root_dir, pkg_store_dir) = match original.ohpa_type {
+            OhpaType::Workspace => {
+                // Link to the member directory (absolute paths replace the
+                // base in `resolve_save_root`/`resolve_pkg_store_dir`).
+                let dir = meta.resolved.clone();
+                (dir.clone(), dir)
             }
-            OhpaType::SourceCode => {
-                if is_link {
-                    (
-                        pinned_parse.fetch_spec.clone(),
-                        pinned_parse.fetch_spec.clone(),
-                    )
-                } else {
-                    let hash = file_path_hash(&pinned_parse.fetch_spec);
-                    (
-                        pkg_store_dir_name(&node_name, &pinned_parse.fetch_spec, &hash),
-                        format!("oh_modules/{node_name}"),
-                    )
-                }
-            }
-            _ => (
+            OhpaType::Git => (
                 pkg_store_dir_name(&node_name, &pinned, ""),
                 format!("oh_modules/{node_name}"),
             ),
+            _ => match pinned_parse.as_ref().map(|p| p.ohpa_type).unwrap_or(OhpaType::Range) {
+                OhpaType::File => {
+                    let hash = file_content_hash(Path::new(
+                        &pinned_parse.as_ref().unwrap().fetch_spec,
+                    ))?;
+                    (
+                        pkg_store_dir_name(&node_name, &pinned_parse.as_ref().unwrap().fetch_spec, &hash),
+                        format!("oh_modules/{node_name}"),
+                    )
+                }
+                OhpaType::SourceCode => {
+                    let fetch = &pinned_parse.as_ref().unwrap().fetch_spec;
+                    if is_link {
+                        (fetch.clone(), fetch.clone())
+                    } else {
+                        let hash = file_path_hash(fetch);
+                        (
+                            pkg_store_dir_name(&node_name, fetch, &hash),
+                            format!("oh_modules/{node_name}"),
+                        )
+                    }
+                }
+                _ => (
+                    pkg_store_dir_name(&node_name, &pinned, ""),
+                    format!("oh_modules/{node_name}"),
+                ),
+            },
         };
 
         let version = if lock_pkg.version.is_empty() {
@@ -522,12 +810,16 @@ impl Resolver {
         };
         Ok(Arc::new(NodeData {
             name: node_name,
+            declared_name: original.name.clone(),
             version,
             actual_name: packument.actual_name.clone(),
             pinned_spec: pinned,
             save_spec,
             fetch_spec: original.fetch_spec.clone(),
-            ohpa_type: pinned_parse.ohpa_type,
+            ohpa_type: pinned_parse
+                .as_ref()
+                .map(|p| p.ohpa_type)
+                .unwrap_or(original.ohpa_type),
             registry_type: packument.registry_type.clone(),
             package_type: lock_pkg.package_type.clone(),
             is_root: false,
@@ -573,20 +865,32 @@ impl Resolver {
         } else {
             node.save_spec.clone()
         };
+        // The specifier key uses the DECLARED name (aliases write
+        // `foo@ohpm:bar@^1.0.0`), the package key the real name (`bar@1.2.3`)
+        // so the flush-prune keeps the right packages entry.
+        let key_name = if node.declared_name.is_empty() {
+            &node.name
+        } else {
+            &node.declared_name
+        };
         let mut lockers = self.lockers.lock().await;
         let locker = lockers
             .entry(root_dir.to_path_buf())
             .or_insert_with(|| Locker::load(root_dir));
-        locker.update_lock_spec(
+        locker.update_lock_spec_named(
+            key_name,
             &node.name,
             &relative_spec(root_dir, &spec),
             &relative_spec(root_dir, &node.pinned_spec),
         );
-        locker.update_lock_pkg(
-            &node.name,
-            &relative_spec(root_dir, &node.pinned_spec),
-            LockPkg::from_node_data(node),
-        );
+        // Workspace members never appear in the packages map (pnpm parity).
+        if node.registry_type != "workspace" {
+            locker.update_lock_pkg(
+                &node.name,
+                &relative_spec(root_dir, &node.pinned_spec),
+                LockPkg::from_node_data(node),
+            );
+        }
     }
 }
 
@@ -597,6 +901,8 @@ pub fn get_pinned_version(name: &str, fetch_spec: &str, packument: &Packument) -
     if keys.len() == 1
         && (packument.is_from_lock_file
             || packument.registry_type == "local"
+            || packument.registry_type == "git"
+            || packument.registry_type == "workspace"
             || is_standard_tag_dependency(fetch_spec))
     {
         return Ok(keys[0].clone());
@@ -786,6 +1092,7 @@ mod tests {
 
         let mut node = NodeData {
             name: "@ohos/foo".into(),
+            declared_name: String::new(),
             version: "1.2.3".into(),
             actual_name: "@ohos/foo".into(),
             pinned_spec: "1.2.3".into(),

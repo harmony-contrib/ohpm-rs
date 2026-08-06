@@ -34,6 +34,12 @@ pub const HSP_DIR: &str = ".hsp";
 /// The "tag:" prefix for tag specs (`tag:<name>`).
 pub const TAG_PREFIX: &str = "tag:";
 
+/// The alias prefix (`ohpm:<real-package>@<spec>`), mirroring pnpm's `npm:`.
+pub const ALIAS_PREFIX: &str = "ohpm:";
+
+/// The workspace protocol prefix (`workspace:<range>`), mirroring pnpm.
+pub const WORKSPACE_PREFIX: &str = "workspace:";
+
 /// Path/content compression for store-dir names (see `Constants.compressConfig`).
 pub mod compress {
     pub const PATH_LEN: usize = 44;

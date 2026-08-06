@@ -27,6 +27,11 @@ pub fn symlink_dir(real: &Path, link: &Path) -> Result<()> {
             format!("The symlink source and target are the same: {}", real.display()),
         ));
     }
+    // Ensure the parent exists so `relative_target` can canonicalize it
+    // (macOS /var -> /private/var would otherwise zero the common prefix).
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let target = relative_target(real, link);
     match std::os::unix::fs::symlink(&target, link) {
         Ok(()) => Ok(()),
@@ -54,9 +59,21 @@ pub fn symlink_dir(real: &Path, link: &Path) -> Result<()> {
     }
 }
 
-/// `path.relative(dirname(link), real)` — forward slashes.
+/// `path.relative(dirname(link), real)` — forward slashes. Both sides are
+/// canonicalized first (workspace member dirs are canonicalized during
+/// discovery; on macOS `/var` is a symlink to `/private/var`, which would
+/// otherwise zero out the common prefix).
 fn relative_target(real: &Path, link: &Path) -> PathBuf {
-    let from = link.parent().unwrap_or_else(|| Path::new("."));
+    let real = real.canonicalize().unwrap_or_else(|_| real.to_path_buf());
+    // The link itself does not exist yet — canonicalize its parent instead.
+    let from = match link.parent() {
+        Some(p) => p
+            .canonicalize()
+            .unwrap_or_else(|_| p.to_path_buf())
+            .join(link.file_name().unwrap_or_default()),
+        None => link.to_path_buf(),
+    };
+    let from = from.parent().unwrap_or_else(|| Path::new("."));
     let from_parts: Vec<_> = from.components().collect();
     let to_parts: Vec<_> = real.components().collect();
     let mut common = 0;

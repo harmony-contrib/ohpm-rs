@@ -5,6 +5,7 @@
 //! store → linking, in a single program. `install`, `update` and `uninstall`
 //! share one pipeline (`run_pipeline`), like the reference's `installModules`.
 
+pub mod git;
 pub mod graph;
 pub mod lock_record;
 pub mod lockfile;
@@ -202,10 +203,12 @@ async fn run_pipeline(
 
     // 2. root nodes + CLI input (`getRootNodeForInstallation`: UPDATE with
     // `--all-modules`, or the prefix module, gets the CLI input handling).
+    let workspace = crate::workspace::Workspace::find(prefix)?;
     let resolver = Arc::new(resolver::Resolver::new(
         client.clone(),
         config.clone(),
         project_root.clone(),
+        workspace,
     ));
     let mut roots: Vec<(PathBuf, Arc<node::Node>)> = Vec::new();
     let mut cli_input_names = Vec::new();

@@ -10,7 +10,7 @@ use crate::constants::{LOCK_JSON, MY_MODULES, PM_DIR};
 use crate::error::Result;
 use crate::install::graph::DependencyGraph;
 use crate::install::node::{DepType, Node};
-use crate::install::spec::is_valid_range;
+use crate::install::spec::{is_protocol_spec, is_valid_range};
 
 /// `DependencyLockFileName`.
 pub const DEPENDENCY_LOCK_FILE_NAME: &str = "lock.json5";
@@ -158,8 +158,12 @@ fn string_map_to_specver(
     out
 }
 
-/// `getSpec` — the declared spec, or `file:<rel>` for local specs.
+/// `getSpec` — the declared spec, or `file:<rel>` for local specs. Protocol
+/// specs (workspace/alias/git) pass through verbatim.
 fn get_spec(project_root: &Path, module_root: &Path, spec: &str) -> String {
+    if is_protocol_spec(spec) {
+        return spec.to_string();
+    }
     if spec == "latest" || is_valid_range(spec) {
         return spec.to_string();
     }
@@ -168,11 +172,14 @@ fn get_spec(project_root: &Path, module_root: &Path, spec: &str) -> String {
     format!("file:{}", relative_slash(project_root, &resolved))
 }
 
-/// `getActualSpec` — the version, or `file:<rel>` for local deps.
+/// `getActualSpec` — the version, or `file:<rel>` for local deps; git deps
+/// use the pinned commit as their version identifier.
 fn get_actual_spec(name: &str, pinned_spec: &str, version: &str, registry_type: &str, project_root: &Path) -> String {
     let _ = name;
     if registry_type == "local" {
         format!("file:{}", relative_slash(project_root, Path::new(pinned_spec)))
+    } else if registry_type == "git" {
+        pinned_spec.to_string()
     } else {
         version.to_string()
     }
@@ -185,7 +192,8 @@ fn fill_packages(
     project_root: &Path,
 ) {
     for node in graph.flat_graph() {
-        if node.data.is_root {
+        if node.data.is_root || node.data.registry_type == "workspace" {
+            // Workspace members never appear in the packages map (pnpm parity).
             continue;
         }
         let key = format!(

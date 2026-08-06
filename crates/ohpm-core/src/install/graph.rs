@@ -50,7 +50,16 @@ impl DependencyGraph {
     pub fn register_node(&mut self, node: Arc<Node>) -> Result<()> {
         let name = node.data.name.clone();
         let fetch_spec = node.data.fetch_spec.clone();
-        self.rough.entry(name.clone()).or_default().insert(fetch_spec, node.clone());
+        self.rough.entry(name.clone()).or_default().insert(fetch_spec.clone(), node.clone());
+        // Aliases (and workspace alias forms) are also indexed under the
+        // DECLARED key so `pick_node("foo", "ohpm:bar@^1.0.0", ...)` finds the
+        // node during the symlink and lock-record phases.
+        if !node.data.declared_name.is_empty() && node.data.declared_name != name {
+            self.rough
+                .entry(node.data.declared_name.clone())
+                .or_default()
+                .insert(fetch_spec, node.clone());
+        }
         if node.data.is_root {
             return Ok(());
         }
@@ -324,6 +333,7 @@ mod tests {
     fn node_data(name: &str, version: &str, pinned: &str) -> Arc<NodeData> {
         Arc::new(NodeData {
             name: name.to_string(),
+            declared_name: String::new(),
             version: version.to_string(),
             actual_name: name.to_string(),
             pinned_spec: pinned.to_string(),
