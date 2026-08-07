@@ -18,6 +18,7 @@ pub async fn run(args: &UninstallArgs) -> Result<()> {
         args.retry_times,
         args.retry_interval,
         args.registry.as_deref(),
+        args.cache.as_deref(),
     )?;
     let prefix = resolve_prefix(args.prefix.as_deref(), "uninstall")?;
 

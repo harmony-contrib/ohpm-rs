@@ -81,9 +81,9 @@ pub fn validate(key: &str, value: &str) -> Option<String> {
                 None
             }
         }
-        types::STRICT_SSL => {
+        types::STRICT_SSL | types::CACHE_HARDLINK => {
             if parse_bool(value).is_none() {
-                Some(format!(" - invalid {} value.", types::STRICT_SSL))
+                Some(format!(" - invalid {} value.", key))
             } else {
                 None
             }

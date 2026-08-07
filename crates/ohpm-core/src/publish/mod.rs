@@ -447,15 +447,12 @@ fn stem_name(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// `~/.ohpm/cache/harBall/<uuid>/`
+/// `<cache>/harBall/<uuid>/`
 fn gen_cache_path(config: &Config) -> PathBuf {
-    let base = config.get_string(types::CACHE);
-    let base = if base.is_empty() {
-        crate::config::default::default_cache()
-    } else {
-        PathBuf::from(base)
-    };
-    let dir = base.join("harBall").join(uuid::Uuid::new_v4().simple().to_string());
+    let dir = config
+        .cache_dir()
+        .join("harBall")
+        .join(uuid::Uuid::new_v4().simple().to_string());
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

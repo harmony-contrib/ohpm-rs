@@ -2,8 +2,15 @@
 //! `lib/core/cache/index.js`, `lib/core/dependency/dep-install/*` and
 //! `lib/core/dependency/visitor/DepNodeInstaller.js`.
 //!
-//! Layout: the global content cache is `<cache>/content-v1/<h[0:2]>/<h[2:4]>/<h[4:]>`
-//! keyed by the sha512 hex of `dist.integrity` (or the sha1 hex of `dist.shasum`).
+//! Layout (empirically matched to the real ohpm): the global content cache is
+//! `<cache>/content-v1/<alg>/<h[0:2]>/<h[2:4]>/<h[4:]>` keyed by the sha512 hex
+//! of `dist.integrity` (or the sha1 hex of `dist.shasum`), with the algorithm
+//! directory (`sha512`/`sha1`) — the reference's `getPkgCachePath` nests under
+//! `<alg>` and real ohpm shares this layout. With `cache_hardlink` enabled
+//! (an ohpm-rs extension, pnpm-store aligned), the same tree is extracted
+//! once into `<cache>/extracted-v1/<alg>/<h[0:2]>/<h[2:4]>/<h[4:]>` and
+//! hard-linked (copy fallback) into each project.
+//!
 //! Packages are extracted (strip=1, `.CodeSignature` skipped) into
 //! `<projectRoot>/oh_modules/.ohpm/<name@version>/oh_modules/<name>` via a
 //! temp dir + atomic rename (the default concurrently-safe mode).
@@ -112,12 +119,7 @@ impl StoreContext {
     }
 
     fn cache_dir(&self) -> PathBuf {
-        let raw = self.config.get_string(types::CACHE);
-        if raw.trim().is_empty() {
-            crate::config::default::default_cache()
-        } else {
-            PathBuf::from(raw)
-        }
+        self.config.cache_dir()
     }
 }
 
@@ -138,17 +140,44 @@ pub fn parse_ssri(integrity: &str) -> Result<(String, String)> {
     Ok((algo.to_string(), hex))
 }
 
-/// `getPkgFilePathInCacheDir` — `<cache>/content-v1/<h[0:2]>/<h[2:4]>/<h[4:]>`.
-pub fn cache_file_path(cache_dir: &Path, hex: &str) -> PathBuf {
+/// `getPkgFilePathInCacheDir` — `<cache>/content-v1/<alg>/<h[0:2]>/<h[2:4]>/<h[4:]>`
+/// (the `<alg>` directory matches the reference layout).
+pub fn cache_file_path(cache_dir: &Path, algo: &str, hex: &str) -> PathBuf {
     cache_dir
         .join("content-v1")
+        .join(algo)
         .join(&hex[0..2])
         .join(&hex[2..4])
         .join(&hex[4..])
 }
 
+/// The hard-link mode's shared extracted layer — the `content-v1` sibling:
+/// `<cache>/extracted-v1/<alg>/<h[0:2]>/<h[2:4]>/<h[4:]>`.
+fn extracted_path_of(cache_path: &Path) -> PathBuf {
+    let mut comps: Vec<std::ffi::OsString> = cache_path
+        .components()
+        .map(|c| c.as_os_str().to_os_string())
+        .collect();
+    for c in comps.iter_mut().rev() {
+        if c == "content-v1" {
+            *c = "extracted-v1".into();
+            break;
+        }
+    }
+    let mut out = PathBuf::new();
+    for c in comps {
+        if c.is_empty() {
+            // The root component (""): push("/") resets to the filesystem root.
+            out.push("/");
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Hash a byte slice with the given algorithm and hex-encode.
-fn hex_digest(algo: &str, bytes: &[u8]) -> String {
+pub(crate) fn hex_digest(algo: &str, bytes: &[u8]) -> String {
     use sha2::Digest;
     match algo {
         "sha1" => {
@@ -182,7 +211,7 @@ pub async fn get_pkg_cache_path(ctx: &StoreContext, node: &Node) -> Result<PathB
             ("sha1".to_string(), shasum)
         }
     };
-    let path = cache_file_path(&ctx.cache_dir(), &digest);
+    let path = cache_file_path(&ctx.cache_dir(), &algo, &digest);
     if path.exists() {
         // Cache hit: re-hash and compare before reuse.
         let bytes = std::fs::read(&path)?;
@@ -255,7 +284,7 @@ pub async fn get_hsp_cache_path(ctx: &StoreContext, node: &Node) -> Result<Optio
             ("sha1".to_string(), shasum)
         }
     };
-    let path = cache_file_path(&ctx.cache_dir(), &digest);
+    let path = cache_file_path(&ctx.cache_dir(), &algo, &digest);
     if path.exists() {
         let bytes = std::fs::read(&path)?;
         if hex_digest(&algo, &bytes) == digest {
@@ -364,26 +393,90 @@ fn handle_install_exception(node: &Node, e: &OhpmError) -> OhpmError {
 }
 
 /// `installRegistryArtifactDep` — cache download + size/traversal checks +
-/// extract (tmp + atomic rename) + `ensureOhPackageJson5`.
+/// extract (tmp + atomic rename) + `ensureOhPackageJson5`. With
+/// `cache_hardlink` enabled (ohpm-rs extension, pnpm-store aligned) the
+/// archive is extracted once into the shared `extracted-v1` layer and each
+/// project's store dir is hard-linked (copy fallback) from it instead.
 async fn install_registry_node(ctx: &StoreContext, node: &Node) -> Result<()> {
     let cache = get_pkg_cache_path(ctx, node).await?;
-    let bytes = std::fs::read(&cache)?;
     let store_dir = node.data.resolve_pkg_store_dir(&ctx.project_root);
-    let sem = Arc::new(Semaphore::new(ctx.max_concurrent));
-    let result = extract_to_store(
-        &cache,
-        &store_dir,
-        bytes.len() as u64,
-        &sem,
-        ctx.concurrent_safe,
-    )
-    .await;
-    result.map_err(|e| handle_install_exception(node, &e))?;
+    if ctx.config.get_bool(types::CACHE_HARDLINK) {
+        let extracted = materialize_extracted(ctx, node, &cache).await?;
+        tokio::task::spawn_blocking(move || link_extracted_to_store(&extracted, &store_dir))
+            .await
+            .map_err(|e| OhpmError::install_pkg_to_local_failed().with_detail(&e.to_string()))?
+            .map_err(|e| handle_install_exception(node, &e))?;
+    } else {
+        let bytes = std::fs::read(&cache)?;
+        let sem = Arc::new(Semaphore::new(ctx.max_concurrent));
+        let result = extract_to_store(
+            &cache,
+            &store_dir,
+            bytes.len() as u64,
+            &sem,
+            ctx.concurrent_safe,
+        )
+        .await;
+        result.map_err(|e| handle_install_exception(node, &e))?;
+    }
     // `installRegistryArtifactDep` — the bundle-app HSP `.hsp` file.
     if node.data.hsp_type.as_deref() == Some(crate::constants::HSP_TYPE_BUNDLE_APP) {
         install_hsp_file(ctx, node).await?;
     }
     Ok(())
+}
+
+/// Extract the cached archive once into the shared `extracted-v1` layer (the
+/// same strip=1 / `.CodeSignature`-skip / `ensureOhPackageJson5` rules as a
+/// project extraction). Returns the extracted dir.
+async fn materialize_extracted(ctx: &StoreContext, node: &Node, archive: &Path) -> Result<PathBuf> {
+    let dir = extracted_path_of(archive);
+    if dir.join(crate::constants::MY_PACKAGE_JSON).is_file() {
+        return Ok(dir);
+    }
+    let bytes = std::fs::read(archive)?;
+    let sem = Arc::new(Semaphore::new(ctx.max_concurrent));
+    let result = extract_to_store(archive, &dir, bytes.len() as u64, &sem, ctx.concurrent_safe).await;
+    result.map_err(|e| handle_install_exception(node, &e))?;
+    Ok(dir)
+}
+
+/// The pnpm-style placement: hard-link the shared extracted tree into the
+/// project store dir. An existing store dir is left alone (`renameIfNotExist`
+/// semantics); cross-device link failures fall back to copying (pnpm's
+/// behavior).
+fn link_extracted_to_store(extracted: &Path, store_dir: &Path) -> Result<()> {
+    if store_dir.join(crate::constants::MY_PACKAGE_JSON).is_file() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(store_dir)?;
+    link_tree(extracted, store_dir)
+}
+
+/// Recursively hard-link `src`'s entries into `dst` (real directories, file
+/// hard links).
+fn link_tree(src: &Path, dst: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&to)?;
+            link_tree(&from, &to)?;
+        } else {
+            link_or_copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hard-link `src` to `dst`, falling back to a full copy when the link fails
+/// (cross-device `EXDEV`, permissions, ... — pnpm falls back the same way).
+fn link_or_copy(src: &Path, dst: &Path) -> Result<()> {
+    match std::fs::hard_link(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => std::fs::copy(src, dst).map(|_| ()).map_err(OhpmError::from),
+    }
 }
 
 /// The `.hsp` file placement: the cached `resolved_hsp` tarball is copied into
@@ -743,8 +836,32 @@ mod tests {
     fn cache_layout() {
         let dir = tempfile::TempDir::new().unwrap();
         let hex = "aabbccddeeff";
-        let p = cache_file_path(dir.path(), hex);
-        assert_eq!(p, dir.path().join("content-v1/aa/bb/ccddeeff"));
+        let p = cache_file_path(dir.path(), "sha512", hex);
+        assert_eq!(p, dir.path().join("content-v1/sha512/aa/bb/ccddeeff"));
+        let p = cache_file_path(dir.path(), "sha1", hex);
+        assert_eq!(p, dir.path().join("content-v1/sha1/aa/bb/ccddeeff"));
+    }
+
+    #[test]
+    fn extracted_path_is_content_sibling() {
+        let p = extracted_path_of(Path::new("/c/content-v1/sha512/aa/bb/cc"));
+        assert_eq!(p, Path::new("/c/extracted-v1/sha512/aa/bb/cc"));
+        // The last "content-v1" component wins (nested names never occur,
+        // but the replacement must not hit an unrelated directory).
+        let p = extracted_path_of(Path::new("/c/content-v1/sha512/aa/content-v1/bb"));
+        assert_eq!(p, Path::new("/c/content-v1/sha512/aa/extracted-v1/bb"));
+    }
+
+    #[test]
+    fn link_or_copy_falls_back_when_link_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        std::fs::write(&src, "content").unwrap();
+        // A pre-existing dst makes `hard_link` fail (EEXIST) → copy fallback.
+        std::fs::write(&dst, "stale").unwrap();
+        link_or_copy(&src, &dst).unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "content");
     }
 
     #[test]

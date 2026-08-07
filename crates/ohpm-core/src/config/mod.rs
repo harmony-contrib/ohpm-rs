@@ -294,6 +294,18 @@ impl Config {
         }
     }
 
+    /// Convenience: the effective local store (cache) directory — where
+    /// `content-v1` / `harball` / `extracted-v1` live. Defaults to
+    /// `~/.ohpm/cache` (the reference's `defaultConfig.cache`).
+    pub fn cache_dir(&self) -> PathBuf {
+        let raw = self.get_string(types::CACHE);
+        if raw.trim().is_empty() {
+            default::default_cache()
+        } else {
+            PathBuf::from(raw)
+        }
+    }
+
     /// Convenience: the effective `publish_registry` (may be empty).
     pub fn publish_registry(&self) -> String {
         let r = self.get_string(types::PUBLISH_REGISTRY);

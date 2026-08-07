@@ -243,9 +243,12 @@ pub struct VersionArgs {
 
 #[derive(Args, Debug, Clone)]
 pub struct CacheArgs {
-    /// Subcommand: clean.
+    /// Subcommand: clean | path | status | add.
     #[arg(value_name = "action")]
     pub action: Option<String>,
+    /// Package(s) for `add`: [<@group>/]<pkg>[@<version> | @tag:<tag>].
+    #[arg(value_name = "pkg")]
+    pub pkg: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -304,6 +307,9 @@ pub struct InstallArgs {
     /// Specify the registry.
     #[arg(long)]
     pub registry: Option<String>,
+    /// Specify the local store (cache) directory.
+    #[arg(long)]
+    pub cache: Option<String>,
     /// Network request timeout in milliseconds.
     #[arg(long = "fetch_timeout")]
     pub fetch_timeout: Option<u64>,
@@ -342,6 +348,9 @@ pub struct UpdateArgs {
     /// Specify the registry.
     #[arg(long)]
     pub registry: Option<String>,
+    /// Specify the local store (cache) directory.
+    #[arg(long)]
+    pub cache: Option<String>,
     #[arg(long = "fetch_timeout")]
     pub fetch_timeout: Option<u64>,
     #[arg(long = "strict_ssl")]
@@ -372,6 +381,9 @@ pub struct UninstallArgs {
     /// Specify the registry.
     #[arg(long)]
     pub registry: Option<String>,
+    /// Specify the local store (cache) directory.
+    #[arg(long)]
+    pub cache: Option<String>,
     #[arg(long = "fetch_timeout")]
     pub fetch_timeout: Option<u64>,
     #[arg(long = "strict_ssl")]

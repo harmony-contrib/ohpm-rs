@@ -9,6 +9,9 @@ pub mod types {
     pub const REGISTRY: &str = "registry";
     pub const PUBLISH_ID: &str = "publish_id";
     pub const CACHE: &str = "cache";
+    /// ohpm-rs extension: install from a shared extracted store via hard links
+    /// (pnpm-style zero-copy reuse). Off by default.
+    pub const CACHE_HARDLINK: &str = "cache_hardlink";
     pub const KEY_PATH: &str = "key_path";
     /// Inline private-key PEM content (alternative to `key_path`).
     pub const KEY_CONTENT: &str = "key_content";
@@ -68,6 +71,7 @@ pub fn default_config() -> BTreeMap<String, ConfigValue> {
     m.insert(types::REGISTRY.to_string(), ConfigValue::String(String::new()));
     m.insert(types::PUBLISH_ID.to_string(), ConfigValue::String(String::new()));
     m.insert(types::CACHE.to_string(), ConfigValue::String(default_cache().to_string_lossy().into_owned()));
+    m.insert(types::CACHE_HARDLINK.to_string(), ConfigValue::Bool(false));
     m.insert(types::KEY_PATH.to_string(), ConfigValue::String(String::new()));
     m.insert(types::KEY_CONTENT.to_string(), ConfigValue::String(String::new()));
     m.insert(types::KEY_PASSPHRASE.to_string(), ConfigValue::String(String::new()));

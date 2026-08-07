@@ -45,6 +45,7 @@ pub fn apply_cli_options(
     retry_times: Option<u32>,
     retry_interval: Option<u64>,
     registry: Option<&str>,
+    cache: Option<&str>,
 ) -> Result<()> {
     if let Some(v) = fetch_timeout {
         config.set_cli(types::FETCH_TIMEOUT, &v.to_string());
@@ -63,6 +64,9 @@ pub fn apply_cli_options(
     }
     if let Some(v) = registry {
         config.set_cli(types::REGISTRY, &ohpm_core::config::ensure_trailing_slash(v));
+    }
+    if let Some(v) = cache {
+        config.set_cli(types::CACHE, v);
     }
     // The CLI option ranges are validated by `valid_cli_options` (per
     // command, with the reference's messages) before the pipeline runs.

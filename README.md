@@ -94,7 +94,7 @@ installation (`config/`, `core/registry/`, `core/publish/`, `core/package/`).
 
 ```sh
 cargo build --workspace        # binary: target/debug/ohpm-rs
-cargo test  --workspace        # 153 tests: unit + mock-registry integration
+cargo test  --workspace        # 196 tests: unit + mock-registry integration
 ```
 
 ## Environment-variable authentication (CI)
@@ -102,12 +102,12 @@ cargo test  --workspace        # 153 tests: unit + mock-registry integration
 All auth inputs are read from `OHPM_*` environment variables, which override
 `.ohpmrc` files. **Precedence: CLI flags > env vars > `.ohpmrc` > defaults.**
 
-| Variable | Purpose |
-|---|---|
-| `OHPM_ACCESS_TOKEN` | Read-write access token — used directly, skips login. Highest priority. |
-| `OHPM_PUBLISH_ID` | Publish id for the SSH-key login flow. |
-| `OHPM_KEY_PATH` | Path to the encrypted private key for the login flow. |
-| `OHPM_KEY_CONTENT` | The private key PEM **content** directly — no file needed (CI secrets). Alternative to `OHPM_KEY_PATH`. |
+| Variable            | Purpose                                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------------- |
+| `OHPM_ACCESS_TOKEN` | Read-write access token — used directly, skips login. Highest priority.                                 |
+| `OHPM_PUBLISH_ID`   | Publish id for the SSH-key login flow.                                                                  |
+| `OHPM_KEY_PATH`     | Path to the encrypted private key for the login flow.                                                   |
+| `OHPM_KEY_CONTENT`  | The private key PEM **content** directly — no file needed (CI secrets). Alternative to `OHPM_KEY_PATH`. |
 
 Key formats: PKCS#8 encrypted (`BEGIN ENCRYPTED PRIVATE KEY`), unencrypted
 PKCS#8/PKCS#1, and **traditional OpenSSL encrypted PKCS#1** (`BEGIN RSA
@@ -211,11 +211,11 @@ A monorepo is identified by an **`ohpm-workspace.yaml`** at the workspace root
 packages:
   - "packages/*"
   - "modules/**"
-exclude:                 # optional: drop members by path glob or package name
+exclude: # optional: drop members by path glob or package name
   - "packages/internal"
   - "@scope/private"
-version:                 # optional versioning policy
-  mode: unified          # unified | independent (default independent)
+version: # optional versioning policy
+  mode: unified # unified | independent (default independent)
 ```
 
 When publishing a package that lives inside a workspace, `file:` protocol
@@ -225,15 +225,20 @@ paths:
 
 ```json5
 // source oh-package.json5
-{ "name": "@app/app", "version": "0.9.0",
-  "dependencies": { "@demo/lib": "file:../lib" } }
+{
+  name: "@app/app",
+  version: "0.9.0",
+  dependencies: { "@demo/lib": "file:../lib" },
+}
 ```
+
 ```json
 // uploaded metadata dependencies
 { "@demo/lib": "1.2.0" }
 ```
 
 Rules:
+
 - A `file:` spec matches `/^file:(\s+)?/i`; the target path is resolved
   relative to the published package's source root (`~` expands to `$HOME`).
 - Targets may be a workspace member directory or any local package with an
@@ -244,14 +249,14 @@ Rules:
 
 ### Workspace support per command
 
-| Command | Workspace mode |
-|---|---|
-| `publish` / `prepublish` | `file:` deps rewritten to member versions before upload; accepts a member directory (auto-pack); `--workspace`/`--filter` publish every (selected) publishable member |
-| `pack` | `--workspace` packs every publishable member; `--filter <pkgs>` selects; `publish: false` skipped |
-| `list` | `-r/--recursive` lists every member's graph; at the workspace root all members are listed by default |
-| `version` | `--workspace` unified, `--filter`, `--preid`, `version.mode` from the yaml, `publish: false` skipped |
-| `unpublish`, `info` | operate by package name — work from anywhere |
-| `init`, `config`, `login`, `ping`, `root`, `cache` | global / cwd-scoped — not workspace-scoped |
+| Command                                            | Workspace mode                                                                                                                                                        |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `publish` / `prepublish`                           | `file:` deps rewritten to member versions before upload; accepts a member directory (auto-pack); `--workspace`/`--filter` publish every (selected) publishable member |
+| `pack`                                             | `--workspace` packs every publishable member; `--filter <pkgs>` selects; `publish: false` skipped                                                                     |
+| `list`                                             | `-r/--recursive` lists every member's graph; at the workspace root all members are listed by default                                                                  |
+| `version`                                          | `--workspace` unified, `--filter`, `--preid`, `version.mode` from the yaml, `publish: false` skipped                                                                  |
+| `unpublish`, `info`                                | operate by package name — work from anywhere                                                                                                                          |
+| `init`, `config`, `login`, `ping`, `root`, `cache` | global / cwd-scoped — not workspace-scoped                                                                                                                            |
 
 ### Versioning
 
@@ -303,6 +308,59 @@ publishable**:
 `exclude:` entries in `ohpm-workspace.yaml` remove a package from the workspace
 entirely; `publish: false` keeps it a member (so others can still depend on it
 via `file:`) but marks it non-publishable.
+
+## The local store
+
+ohpm-rs keeps every downloaded package in a **content-addressed store** shared
+by all projects on the machine — the `cache` config directory (default
+`~/.ohpm/cache`), pnpm-store aligned:
+
+```
+<cache>/
+  content-v1/<alg>/<h[0:2]>/<h[2:4]>/<h[4:]>   # downloaded archives, keyed by digest
+  extracted-v1/<alg>/<h[0:2]>/<h[2:4]>/<h[4:]> # shared extracted trees (hard-link mode only)
+  harball/                                     # publish staging
+```
+
+The layout matches real ohpm byte-for-byte, so ohpm-rs and the reference tool
+share one cache: each side reuses the other's downloads (`ohpm DEBUG: found
+package ... from cache file`).
+
+Configure the store (pnpm-style resolution: env > CLI > project `.ohpmrc` >
+user `~/.ohpm/.ohpmrc` > default):
+
+```sh
+ohpm-rs config set cache /path/to/store     # persist (user rc)
+OHPM_CACHE=/path/to/store ohpm-rs install   # per-invocation
+ohpm-rs install --cache /path/to/store      # per-command
+ohpm-rs cache path                          # print the effective store dir
+```
+
+Manage it (≈ `pnpm store`):
+
+```sh
+ohpm-rs cache path                          # effective store dir
+ohpm-rs cache status                        # verify every cached archive's integrity
+ohpm-rs cache add @ohos/foo@1.2.3           # pre-fetch into the store (no install)
+ohpm-rs cache clean                         # drop content-v1 + harball (+ extracted-v1)
+```
+
+`cache add` accepts registry packages only (`name[@version | @tag:<tag>]`;
+`tag:latest` is invalid, like the reference); repeat runs are served from the
+store.
+
+### Hard-link mode (`cache_hardlink`, default off)
+
+By default each project extracts its own copy of a package into `oh_modules`
+(reference behavior). With `cache_hardlink=true` (via `config set`,
+`OHPM_CACHE_HARDLINK`, or `~/.ohpm/.ohpmrc`), the archive is extracted once
+into the shared `extracted-v1` layer and every project's store dir is
+hard-linked from it — pnpm's zero-copy reuse: two projects installing the same
+version share the same files on disk (copy fallback on cross-device links).
+
+> ⚠️ Hard links share inodes: a build tool that modifies files inside
+> `oh_modules` would corrupt the shared layer for every project using it.
+> Keep the default off unless you understand this trade-off.
 
 ## Notes on fidelity
 
