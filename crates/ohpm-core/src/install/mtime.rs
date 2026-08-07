@@ -5,7 +5,7 @@
 //! `{ "<absPath>": "<mtimeMs>", "<absPath>#SHA256": "<sha256-base64-lower>" }`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::default::default_cache;
 use crate::error::Result;
@@ -15,11 +15,16 @@ use crate::install::node::file_content_hash;
 pub const SUFFIX_CONTENT_HASH: &str = "#SHA256";
 
 /// The mtime/hash cache for one project root.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MtimeCache {
     inner: BTreeMap<String, String>,
     path: Option<std::path::PathBuf>,
     dirty: bool,
+    /// The basis of the cache keys: like the reference, local artifacts are
+    /// keyed by their project-relative path (the reference's `pinnedSpec`),
+    /// so the same relative layout reuses the cache across locations and the
+    /// lockfile-first check (`tryFetchFileResultFromLockPkg`) can hit.
+    project_root: PathBuf,
 }
 
 impl MtimeCache {
@@ -39,23 +44,33 @@ impl MtimeCache {
             inner,
             path: Some(path),
             dirty: false,
+            project_root: project_root.to_path_buf(),
         }
     }
 
+    /// The cache key of an artifact — its path relative to the project root
+    /// (forward slashes), mirroring the reference's `pinnedSpec` keys.
+    fn key(&self, abs_path: &Path) -> String {
+        crate::install::lockfile::relative_spec(&self.project_root, &abs_path.to_string_lossy())
+    }
+
     /// `getLocalArtifactMtime` — the cached mtimeMs string of an artifact.
-    pub fn get_mtime(&self, path: &Path) -> Option<&str> {
-        self.inner.get(path.to_string_lossy().as_ref()).map(|s| s.as_str())
+    pub fn get_mtime(&self, abs_path: &Path) -> Option<&str> {
+        self.inner.get(&self.key(abs_path)).map(|s| s.as_str())
     }
 
     /// `getLocalArtifactHash` — the cached content hash of an artifact.
-    pub fn get_hash(&self, path: &Path) -> Option<&str> {
+    pub fn get_hash(&self, abs_path: &Path) -> Option<&str> {
         self.inner
-            .get(&format!("{}{SUFFIX_CONTENT_HASH}", path.to_string_lossy()))
+            .get(&format!("{}{SUFFIX_CONTENT_HASH}", self.key(abs_path)))
             .map(|s| s.as_str())
     }
 
     /// `getFileStoreDirName` — reuse the cached hash when the mtime still
-    /// matches; otherwise recompute and update the hash entry.
+    /// matches; otherwise recompute and update the hash entry. The mtime is
+    /// recorded alongside the hash (the reference writes it after the install;
+    /// for the artifact itself the value is the same at resolve time), so the
+    /// next run's lockfile-first check can hit.
     pub fn get_file_store_dir_name(&mut self, name: &str, abs_path: &Path) -> Result<String> {
         let current_mtime = read_modify_time(abs_path);
         let cached_mtime = self.get_mtime(abs_path);
@@ -65,7 +80,9 @@ impl MtimeCache {
                 None => self.recompute_hash(abs_path)?,
             }
         } else {
-            self.recompute_hash(abs_path)?
+            let hash = self.recompute_hash(abs_path)?;
+            self.update_mtime(abs_path, current_mtime);
+            hash
         };
         Ok(crate::install::node::pkg_store_dir_name(
             name,
@@ -77,14 +94,14 @@ impl MtimeCache {
     fn recompute_hash(&mut self, abs_path: &Path) -> Result<String> {
         let hash = file_content_hash(abs_path)?;
         self.inner
-            .insert(format!("{}{SUFFIX_CONTENT_HASH}", abs_path.to_string_lossy()), hash.clone());
+            .insert(format!("{}{SUFFIX_CONTENT_HASH}", self.key(abs_path)), hash.clone());
         self.dirty = true;
         Ok(hash)
     }
 
     /// `updateGlobalMtimeCacheAfterInstallation` — record the artifact mtime.
-    pub fn update_mtime(&mut self, path: &Path, mtime: String) {
-        self.inner.insert(path.to_string_lossy().into_owned(), mtime);
+    pub fn update_mtime(&mut self, abs_path: &Path, mtime: String) {
+        self.inner.insert(self.key(abs_path), mtime);
         self.dirty = true;
     }
 
@@ -151,7 +168,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let f = dir.path().join("a.har");
         std::fs::write(&f, "content").unwrap();
-        let mut cache = MtimeCache::default();
+        let mut cache = MtimeCache::load_with_cache_dir(&dir.path().join(".mtime"), dir.path());
         let first = cache.get_file_store_dir_name("foo", &f).unwrap();
         assert!(first.starts_with("foo@"), "{first}");
         let hash = cache.get_hash(&f).unwrap().to_string();
@@ -162,10 +179,47 @@ mod tests {
         let second = cache.get_file_store_dir_name("foo", &f).unwrap();
         assert_eq!(first, second);
 
-        // Changed content -> new hash.
+        // Changed content -> new hash (bump the mtime explicitly — same-ms
+        // writes keep the millisecond mtime, which the cache legitimately
+        // treats as unchanged).
         std::fs::write(&f, "changed").unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        filetime::set_file_mtime(&f, filetime::FileTime::from_unix_time((now.as_secs() + 1) as i64, 0))
+            .unwrap();
         let third = cache.get_file_store_dir_name("foo", &f).unwrap();
         assert_ne!(first, third);
+    }
+
+    #[test]
+    fn keys_are_project_relative_and_mtime_recorded() {
+        // The artifact lives outside the project root (`../dep/a.har`), like
+        // a `file:../lib` dependency — the cache key must be the relative
+        // path (the reference's `pinnedSpec`), never the absolute one.
+        let proj = tempfile::TempDir::new().unwrap();
+        let dep = tempfile::TempDir::new().unwrap();
+        let f = dep.path().join("a.har");
+        std::fs::write(&f, "content").unwrap();
+        let mut cache = MtimeCache::load_with_cache_dir(&proj.path().join(".mtime"), proj.path());
+
+        cache.get_file_store_dir_name("foo", &f).unwrap();
+
+        // Both entries exist under the relative key (with `..`), and no
+        // absolute path leaks into the cache.
+        let rel = cache.key(&f);
+        assert!(rel.starts_with(".."), "{rel}");
+        assert!(cache.inner.contains_key(&rel), "{:?}", cache.inner);
+        assert!(cache.inner.contains_key(&format!("{rel}#SHA256")), "{:?}", cache.inner);
+        assert!(cache.inner.keys().all(|k| !Path::new(k).is_absolute()), "{:?}", cache.inner);
+
+        // The mtime is recorded with the hash, so the lockfile-first check
+        // (same mtime, cached hash) can hit on the next run.
+        assert_eq!(
+            cache.get_mtime(&f),
+            Some(read_modify_time(&f).as_str()),
+            "mtime must be recorded alongside the hash"
+        );
     }
 
     #[test]

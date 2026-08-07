@@ -1005,10 +1005,14 @@ impl Resolver {
                 };
                 let (_, version) = crate::install::lockfile::parse_spec_key(&value)
                     .map_err(|_| OhpmError::locker_invalid_specifier(&value))?;
-                let path = Path::new(&version);
+                // The lockfile's relative path resolves against the module
+                // root; the mtime cache keys are project-root-relative (the
+                // reference's `pinnedSpec`), so the artifact is read and
+                // compared through its absolute path.
+                let abs = crate::workspace::resolve_file_spec(root_dir, &format!("file:{version}"));
                 let cache = self.mtime_cache.lock().await;
-                let mtime_ok = cache.get_mtime(path) == Some(crate::install::mtime::read_modify_time(path).as_str());
-                let hash_ok = cache.get_hash(path).is_some();
+                let mtime_ok = cache.get_mtime(&abs) == Some(crate::install::mtime::read_modify_time(&abs).as_str());
+                let hash_ok = cache.get_hash(&abs).is_some();
                 if !(mtime_ok && hash_ok && !lock_pkg.name.is_empty() && !lock_pkg.version.is_empty()) {
                     return Ok(None);
                 }
