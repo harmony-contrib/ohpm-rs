@@ -1389,6 +1389,29 @@ impl Resolver {
                 return;
             }
         }
+        // Workspace members lock as their relative member path (pnpm parity:
+        // pnpm keys the member in the packages map by its path, so an
+        // unpublished member is reproducible from the lockfile alone). The
+        // specifier keeps the `workspace:` protocol, and resolution always
+        // re-resolves the member locally — never through the registry, even
+        // when the member is unpublished.
+        if node.registry_type == "workspace" {
+            let rel = relative_spec(self.lock_root(root_dir), &node.resolved);
+            self.with_locker(root_dir, |locker| {
+                locker.update_lock_spec_named(
+                    key_name,
+                    &node.name,
+                    &relative_spec(self.lock_root(root_dir), &spec),
+                    &rel,
+                );
+                let mut pkg = LockPkg::from_node_data(node);
+                pkg.registry_type = "workspace".to_string();
+                pkg.resolved = rel.clone();
+                locker.update_lock_pkg(&node.name, &rel, pkg);
+            })
+            .await;
+            return;
+        }
         let lock_root = self.lock_root(root_dir).to_path_buf();
         let mut lockers = self.lockers.lock().await;
         let locker = lockers
@@ -1400,14 +1423,11 @@ impl Resolver {
             &relative_spec(self.lock_root(root_dir), &spec),
             &relative_spec(self.lock_root(root_dir), &node.pinned_spec),
         );
-        // Workspace members never appear in the packages map (pnpm parity).
-        if node.registry_type != "workspace" {
-            locker.update_lock_pkg(
-                &node.name,
-                &relative_spec(self.lock_root(root_dir), &node.pinned_spec),
-                LockPkg::from_node_data(node),
-            );
-        }
+        locker.update_lock_pkg(
+            &node.name,
+            &relative_spec(self.lock_root(root_dir), &node.pinned_spec),
+            LockPkg::from_node_data(node),
+        );
     }
 }
 

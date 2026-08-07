@@ -303,7 +303,12 @@ fn discover_members(root: &Path, patterns: &[String], exclude: &[String]) -> Res
         let entries = glob::glob(&pattern_str)
             .map_err(|e| OhpmError::new("WorkspaceGlobError", format!("{pattern_str}: {e}")))?;
         for entry in entries.flatten() {
-            let dir = entry.canonicalize().unwrap_or(entry.clone());
+            // Lexical normalization only — the same basis as
+            // `resolve_file_spec`, so member paths compare equal to
+            // `file:`-derived paths and relativize cleanly against the
+            // module root (`canonicalize()` would break the common-prefix
+            // on symlinked roots like macOS `/var` -> `/private/var`).
+            let dir = normalize_lexical(&entry);
             if !dir.is_dir() {
                 continue;
             }

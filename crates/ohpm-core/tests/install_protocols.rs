@@ -431,9 +431,25 @@ async fn workspace_protocol() {
     let link = std::fs::read_link(prefix.join("oh_modules/baz")).unwrap();
     assert_eq!(link, PathBuf::from("../../packages/baz"));
 
-    // Workspace members never appear in packages; with no registry packages
-    // the lockfile is not written (mirrors the reference flush condition).
-    assert!(!prefix.join("oh-package-lock.json5").exists());
+    // Workspace members lock as their relative member path (pnpm parity:
+    // the member appears in the packages map keyed by its path), so an
+    // unpublished member is reproducible from the lockfile alone.
+    let lock_text = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
+    let lock: serde_json::Value = json5::from_str(&lock_text).unwrap();
+    assert_eq!(lock["specifiers"]["bar@workspace:^1.0.0"], "bar@../packages/bar");
+    assert_eq!(lock["specifiers"]["baz@workspace:*"], "baz@../packages/baz");
+    let packages = lock["packages"].as_object().unwrap();
+    let bar = packages["bar@../packages/bar"].as_object().unwrap();
+    assert_eq!(bar["version"], "1.0.0");
+    assert_eq!(bar["resolved"], "../packages/bar");
+    assert_eq!(bar["registryType"], "workspace");
+
+    // Reinstall: workspace re-resolves the member locally (never the
+    // registry) and rewrites the same path form — the lockfile is stable.
+    let outcome = run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    assert_eq!(outcome.installed, 0, "workspace members are links, not installs");
+    let again = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
+    assert_eq!(again, lock_text, "lockfile must be stable across reinstalls");
 
     // Missing member -> WorkspacePkgNotFound.
     let prefix2 = ws_root.join("entry2");

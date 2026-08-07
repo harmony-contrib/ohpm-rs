@@ -344,6 +344,12 @@ fn resolve_local(root: &Path, spec: &str) -> String {
 
 /// `path.relative` with forward slashes.
 fn relative_path(from: &Path, to: &Path) -> String {
+    // Canonicalize both sides: workspace member dirs are canonicalized at
+    // discovery while the module root may still carry a symlinked prefix
+    // (macOS `/var` -> `/private/var`), which would zero the common prefix
+    // and produce a wrong `../..`-chain instead of the true relative path.
+    let from = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
+    let to = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
     let from: Vec<_> = from.components().collect();
     let to: Vec<_> = to.components().collect();
     let mut common = 0;
@@ -495,6 +501,7 @@ impl Locker {
         // Specifiers: drop unvisited; collect the surviving values as the
         // visited package keys (the reference additionally protects inner-file
         // dep packages when `enable_lock_inner_pkg_version` is off — deferred).
+        eprintln!("FLUSH-DEBUG2: specifiers={:?}", lockfile.specifiers);
         lockfile.specifiers.retain(|key, value| {
             if !visited_spec_keys.contains(key) {
                 return false;
