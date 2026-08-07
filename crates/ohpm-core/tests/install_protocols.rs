@@ -496,3 +496,94 @@ async fn publish_workspace_replacement() {
     let err = ohpm_core::workspace::process_workspace_dependencies(&ws, &ws_root, &mut manifest).unwrap_err();
     assert_eq!(err.code, "WorkspacePkgNotFound");
 }
+
+/// File dependencies (`file:../dir` source code, `file:../x.har` artifact)
+/// lock into the lockfile with **relative** `resolved` paths — the reference
+/// stores the relative fetch spec, so the lockfile survives a machine move.
+#[tokio::test]
+async fn file_dependencies_lockfile_stays_relative() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+
+    // A source-code dependency: ../lib-bar.
+    let lib_bar = work.path().join("lib-bar");
+    std::fs::create_dir_all(&lib_bar).unwrap();
+    std::fs::write(
+        lib_bar.join("oh-package.json5"),
+        "{ name: \"lib-bar\", version: \"1.0.0\", main: \"index.ets\" }\n",
+    )
+    .unwrap();
+    std::fs::write(lib_bar.join("index.ets"), "export {}\n").unwrap();
+
+    // A local artifact dependency: ../lib-tgz/pkg.har.
+    let lib_tgz = work.path().join("lib-tgz");
+    std::fs::create_dir_all(&lib_tgz).unwrap();
+    let har = build_har(work.path(), "@ohos/lib-tgz", "2.0.0", &BTreeMap::new());
+    std::fs::write(lib_tgz.join("pkg.har"), har).unwrap();
+
+    let prefix = work.path().join("entry");
+    write_manifest(
+        &prefix,
+        "{ \"lib-bar\": \"file:../lib-bar\", \"@ohos/lib-tgz\": \"file:../lib-tgz/pkg.har\" }",
+        "{}",
+    );
+    // Pure local deps — no registry needed.
+    let cfg = load_config(home.path(), "https://example.invalid/", cache.path());
+    run_install(&cfg, &prefix, &[], &InstallOptions::default())
+        .await
+        .unwrap();
+
+    let lock_text = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
+    let lock: serde_json::Value = json5::from_str(&lock_text).unwrap();
+    let packages = lock["packages"].as_object().unwrap();
+
+    // Source-code entry: key and resolved are project-relative.
+    let src = packages["lib-bar@../lib-bar"].as_object().unwrap();
+    assert_eq!(src["resolved"], "../lib-bar");
+    assert_eq!(src["registryType"], "local");
+
+    // Artifact entry: same relative form for the .har path.
+    let art = packages["@ohos/lib-tgz@../lib-tgz/pkg.har"].as_object().unwrap();
+    assert_eq!(art["resolved"], "../lib-tgz/pkg.har");
+    assert_eq!(art["registryType"], "local");
+
+    // No absolute path may leak into the lockfile.
+    let abs = work.path().canonicalize().unwrap();
+    assert!(!lock_text.contains(abs.to_str().unwrap()), "{lock_text}");
+
+    // Machine-move simulation: the project moves elsewhere with the same
+    // relative layout; reinstall succeeds and the lockfile is byte-identical
+    // (nothing is re-resolved against the old location).
+    let moved = tempfile::TempDir::new().unwrap();
+    let moved_entry = moved.path().join("entry");
+    std::fs::create_dir_all(&moved_entry).unwrap();
+    std::fs::copy(prefix.join("oh-package.json5"), moved_entry.join("oh-package.json5")).unwrap();
+    std::fs::copy(prefix.join("oh-package-lock.json5"), moved_entry.join("oh-package-lock.json5")).unwrap();
+    copy_dir(&lib_bar, &moved.path().join("lib-bar"));
+    copy_dir(&lib_tgz, &moved.path().join("lib-tgz"));
+
+    run_install(&cfg, &moved_entry, &[], &InstallOptions::default())
+        .await
+        .unwrap();
+    let moved_text = std::fs::read_to_string(moved_entry.join("oh-package-lock.json5")).unwrap();
+    assert_eq!(moved_text, lock_text, "lockfile must be stable across machines");
+}
+
+/// Minimal recursive directory copy (test helper).
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}

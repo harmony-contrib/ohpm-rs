@@ -447,7 +447,16 @@ impl Locker {
     }
 
     /// `updateLockPkg` — `name@version` -> package entry.
-    pub fn update_lock_pkg(&mut self, name: &str, version: &str, pkg: LockPkg) {
+    ///
+    /// Local deps' `resolved` is relativized against the module root: the
+    /// reference stores the relative fetch spec (`file:../lib` -> `../lib`)
+    /// so the lockfile stays valid across machines, and real ohpm shares the
+    /// node's relative path through `getLockPkgFromNodeData`. Registry/git
+    /// entries pass through untouched.
+    pub fn update_lock_pkg(&mut self, name: &str, version: &str, mut pkg: LockPkg) {
+        if pkg.registry_type == "local" {
+            pkg.resolved = relative_spec(&self.module_root, &pkg.resolved);
+        }
         self.lockfile
             .packages
             .insert(format!("{name}@{version}"), pkg);
