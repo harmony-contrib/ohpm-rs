@@ -37,6 +37,54 @@ impl RegistryClient {
     pub fn user_agent() -> String {
         constants::user_agent()
     }
+
+    /// Check whether an exact package version is already present in a
+    /// registry packument.
+    ///
+    /// A missing package (`404`) is not an error and returns `false`. Other
+    /// non-success responses and malformed packuments are errors: publish must
+    /// not continue when the registry cannot be checked reliably.
+    pub async fn is_version_published(
+        &self,
+        registry: &str,
+        name: &str,
+        version: &str,
+        token: &str,
+    ) -> crate::Result<bool> {
+        let url = format!(
+            "{}{}",
+            crate::config::ensure_trailing_slash(registry),
+            url_encode_pkg_name(name)
+        );
+        let mut request = self
+            .http
+            .get(&url)
+            .header("user-agent", constants::user_agent());
+        if !token.is_empty() {
+            request = request.header("authorization", token);
+        }
+
+        let response = request.send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(crate::OhpmError::response_status(status.as_u16(), &body));
+        }
+
+        let metadata: serde_json::Value = response.json().await?;
+        let versions = metadata
+            .get("versions")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                crate::OhpmError::request_failed(&format!(
+                    "registry metadata for \"{name}\" does not contain a versions object"
+                ))
+            })?;
+        Ok(versions.contains_key(version))
+    }
 }
 
 /// Normalize a package name for URL paths: `@group/name` -> `@group%2fname`

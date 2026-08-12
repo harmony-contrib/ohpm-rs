@@ -56,7 +56,12 @@ pub async fn run(args: &PublishArgs) -> Result<()> {
 }
 
 fn print_outcome(outcome: &publish::PublishOutcome) {
-    if outcome.dry_run {
+    if outcome.skipped {
+        output::warn(&format!(
+            "{}@{} is already published; skipping.",
+            outcome.name, outcome.version
+        ));
+    } else if outcome.dry_run {
         output::output(&format!(
             "[DRY RUN] +{} {} ({} bytes, {} files, auth: {})",
             outcome.name,
@@ -104,9 +109,16 @@ async fn run_workspace(
     for outcome in &outcomes {
         print_outcome(outcome);
     }
-    if !outcomes.is_empty() {
-        let verb = if args.dry_run { "would publish" } else { "published" };
-        output::succeed(&format!("{verb} {} package(s)", outcomes.len()));
+    let published_count = outcomes.iter().filter(|outcome| !outcome.skipped).count();
+    if published_count > 0 {
+        let verb = if args.dry_run {
+            "would publish"
+        } else {
+            "published"
+        };
+        output::succeed(&format!("{verb} {published_count} package(s)"));
+    } else if !outcomes.is_empty() {
+        output::output("no package was published (all selected versions are already published)");
     } else {
         output::output("no package was published (all selected members are publish: false)");
     }

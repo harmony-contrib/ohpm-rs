@@ -94,7 +94,7 @@ installation (`config/`, `core/registry/`, `core/publish/`, `core/package/`).
 
 ```sh
 cargo build --workspace        # binary: target/debug/ohpm-rs
-cargo test  --workspace        # 196 tests: unit + mock-registry integration
+cargo test  --workspace        # 201 tests: unit + mock-registry integration
 ```
 
 ## Environment-variable authentication (CI)
@@ -163,7 +163,11 @@ ohpm-rs login --publish_id <id> --key_path /path/to/key.pem
 directory, packed on the fly; a directory argument = pack that directory; a
 `.har`/`.tgz` argument = publish the pre-built package as-is. In a workspace,
 `--workspace` publishes every publishable member (or `--filter <pkgs>` a
-selected subset); `publish: false` members are skipped.
+selected subset); `publish: false` members are skipped. Before each real
+upload, `publish` queries the target publish registry for the exact
+`name@version`. An already-published version is skipped with a warning, while
+other versions of the same package continue normally. Registry/auth/protocol
+errors fail the command instead of being treated as an unpublished version.
 
 `publish --dry-run` validates everything locally — packing, metadata, and the
 auth configuration (the key is parsed, the token/env/config inputs are

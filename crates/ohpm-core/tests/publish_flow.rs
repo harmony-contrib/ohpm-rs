@@ -3,18 +3,19 @@
 //! These verify the core requirement of this reimplementation: `publish` can
 //! authenticate entirely from environment variables with no TUI input.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
-use axum::extract::{Request, State};
+use axum::extract::{Path as AxumPath, Request, State};
 use axum::http::{Method, StatusCode, Uri};
-use axum::response::IntoResponse;
-use axum::routing::{post, put};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use ohpm_core::config::Config;
-use ohpm_core::publish::{PublishRequest, publish};
+use ohpm_core::publish::{publish, PublishRequest};
 use ohpm_core::registry::login::LoginContext;
 use ohpm_core::registry::RegistryClient;
 use serde_json::Value;
@@ -24,6 +25,12 @@ use serde_json::Value;
 struct Capture {
     login_pss: Vec<Value>,
     login_default: Vec<Value>,
+    /// (decoded package name, authorization header) for packument GETs.
+    metadata_gets: Vec<(String, String)>,
+    /// Exact package versions exposed by the mock registry.
+    published_versions: BTreeMap<String, BTreeSet<String>>,
+    /// Forced non-success responses for metadata probes.
+    metadata_errors: BTreeMap<String, StatusCode>,
     /// (authorization header, metadata JSON) for attachment (PUT) uploads.
     attachment: Vec<(String, Value)>,
     /// (authorization header, body) for stream (POST multipart) uploads.
@@ -121,7 +128,10 @@ async fn spawn_mock() -> (String, Arc<Mutex<Capture>>) {
         .route("/ohpm/login_pss", post(login_pss_handler))
         .route("/ohpm/login", post(login_default_handler))
         .route("/ohpm/stream/:name", post(stream_handler))
-        .route("/ohpm/:name", put(attachment_handler))
+        .route(
+            "/ohpm/:name",
+            get(package_info_handler).put(attachment_handler),
+        )
         .fallback(unmatched_handler)
         .with_state(capture.clone());
 
@@ -147,6 +157,48 @@ async fn login_default_handler(
 ) -> impl IntoResponse {
     cap.lock().unwrap_or_else(|e| e.into_inner()).login_default.push(body);
     Json(serde_json::json!({ "token": "token-from-default" }))
+}
+
+async fn package_info_handler(
+    State(cap): State<Arc<Mutex<Capture>>>,
+    AxumPath(name): AxumPath<String>,
+    req: Request,
+) -> Response {
+    let auth = req
+        .headers()
+        .get("authorization")
+        .map(|value| value.to_str().unwrap_or_default().to_string())
+        .unwrap_or_default();
+    let (versions, error_status) = {
+        let mut cap = cap.lock().unwrap_or_else(|error| error.into_inner());
+        cap.metadata_gets.push((name.clone(), auth));
+        (
+            cap.published_versions.get(&name).cloned(),
+            cap.metadata_errors.get(&name).copied(),
+        )
+    };
+
+    if let Some(status) = error_status {
+        return (status, "metadata probe failed").into_response();
+    }
+    let Some(versions) = versions else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let versions = versions
+        .into_iter()
+        .map(|version| {
+            let metadata = serde_json::json!({
+                "name": &name,
+                "version": &version,
+            });
+            (version, metadata)
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    Json(serde_json::json!({
+        "name": name,
+        "versions": versions,
+    }))
+    .into_response()
 }
 
 async fn attachment_handler(
@@ -220,6 +272,121 @@ async fn publish_with_env_access_token() {
     assert_eq!(version["tag"], "latest");
     // internal fields must be cleared before upload
     assert!(meta.get("pkg").is_none());
+}
+
+/// Publishing an exact version that is already in the registry is a
+/// successful no-op. The write token is used for the metadata probe and no
+/// upload request is sent.
+#[tokio::test]
+async fn publish_skips_already_published_version() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _env = EnvGuard::new();
+    let (registry, capture) = spawn_mock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let har = build_har(dir.path(), "com.example.exists", "1.0.0");
+    capture
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .published_versions
+        .insert(
+            "com.example.exists".into(),
+            BTreeSet::from(["1.0.0".into()]),
+        );
+
+    std::env::set_var("OHPM_ACCESS_TOKEN", "publish-token");
+    let config = load_config(dir.path());
+    let req = PublishRequest {
+        file: har.to_string_lossy().into_owned(),
+        publish_registry: Some(registry),
+        ..Default::default()
+    };
+    let client = RegistryClient::from_config(&config).unwrap();
+    let outcome = publish(&client, &config, &req)
+        .await
+        .expect("already-published versions should be skipped");
+
+    assert!(outcome.skipped);
+    assert_eq!(outcome.name, "com.example.exists");
+    assert_eq!(outcome.version, "1.0.0");
+    let cap = capture.lock().unwrap_or_else(|error| error.into_inner());
+    assert_eq!(
+        cap.metadata_gets,
+        vec![("com.example.exists".into(), "publish-token".into())]
+    );
+    assert!(cap.attachment.is_empty());
+    assert!(cap.stream.is_empty());
+}
+
+/// An existing package must not suppress a new version of that package.
+#[tokio::test]
+async fn publish_continues_when_only_another_version_exists() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _env = EnvGuard::new();
+    let (registry, capture) = spawn_mock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let har = build_har(dir.path(), "com.example.next", "2.0.0");
+    capture
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .published_versions
+        .insert(
+            "com.example.next".into(),
+            BTreeSet::from(["1.0.0".into()]),
+        );
+
+    std::env::set_var("OHPM_ACCESS_TOKEN", "publish-token");
+    let config = load_config(dir.path());
+    let req = PublishRequest {
+        file: har.to_string_lossy().into_owned(),
+        publish_registry: Some(registry),
+        ..Default::default()
+    };
+    let client = RegistryClient::from_config(&config).unwrap();
+    let outcome = publish(&client, &config, &req)
+        .await
+        .expect("a new version should still be published");
+
+    assert!(!outcome.skipped);
+    let cap = capture.lock().unwrap_or_else(|error| error.into_inner());
+    assert_eq!(cap.metadata_gets.len(), 1);
+    assert_eq!(cap.attachment.len(), 1);
+}
+
+/// Registry failures are not equivalent to an unpublished version: publish
+/// must stop rather than risking a duplicate upload.
+#[tokio::test]
+async fn publish_stops_when_version_probe_fails() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let _env = EnvGuard::new();
+    let (registry, capture) = spawn_mock().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let har = build_har(dir.path(), "com.example.probe-error", "1.0.0");
+    capture
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .metadata_errors
+        .insert(
+            "com.example.probe-error".into(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+
+    std::env::set_var("OHPM_ACCESS_TOKEN", "publish-token");
+    let config = load_config(dir.path());
+    let req = PublishRequest {
+        file: har.to_string_lossy().into_owned(),
+        publish_registry: Some(registry),
+        ..Default::default()
+    };
+    let client = RegistryClient::from_config(&config).unwrap();
+    let error = publish(&client, &config, &req)
+        .await
+        .expect_err("metadata probe failures must stop publishing");
+
+    assert_eq!(error.code, "ResponseStatusError");
+    assert!(error.message.contains("503"));
+    let cap = capture.lock().unwrap_or_else(|error| error.into_inner());
+    assert!(cap.attachment.is_empty());
+    assert!(cap.stream.is_empty());
 }
 
 /// Publish with env token -> stream upload (POST multipart) when size exceeds
@@ -489,8 +656,8 @@ async fn publish_with_key_content_env() {
     assert_eq!(cap.attachment.len(), 1);
 }
 
-/// `publish_workspace` publishes every publishable member and skips
-/// `publish: false` ones.
+/// `publish_workspace` publishes new versions, returns skipped outcomes for
+/// versions already in the registry, and excludes `publish: false` members.
 #[tokio::test]
 async fn publish_workspace_batch() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -517,6 +684,11 @@ async fn publish_workspace_batch() {
 
     std::env::set_var("OHPM_ACCESS_TOKEN", "ws-token");
     let config = load_config(dir.path());
+    capture
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .published_versions
+        .insert("pkg.a".into(), BTreeSet::from(["1.0.0".into()]));
     let ws = ohpm_core::workspace::Workspace::load(dir.path()).unwrap();
     let client = RegistryClient::from_config(&config).unwrap();
     let base = PublishRequest {
@@ -527,10 +699,24 @@ async fn publish_workspace_batch() {
         .await
         .expect("workspace publish should succeed");
     let names: Vec<&str> = outcomes.iter().map(|o| o.name.as_str()).collect();
-    assert_eq!(names, vec!["pkg.a", "pkg.b"], "publish: false member is skipped");
+    assert_eq!(
+        names,
+        vec!["pkg.a", "pkg.b"],
+        "publish: false member is skipped"
+    );
+    assert!(
+        outcomes[0].skipped,
+        "the existing pkg.a@1.0.0 must be skipped"
+    );
+    assert!(
+        !outcomes[1].skipped,
+        "the new pkg.b@1.0.0 must be published"
+    );
 
     let cap = capture.lock().unwrap_or_else(|e| e.into_inner());
-    assert_eq!(cap.attachment.len(), 2);
+    assert_eq!(cap.metadata_gets.len(), 2);
+    assert_eq!(cap.attachment.len(), 1);
+    assert_eq!(cap.attachment[0].1["name"], "pkg.b");
     // The publish: false member must not have been uploaded.
     assert!(!cap.attachment.iter().any(|(_, m)| m["name"] == "pkg.priv"));
 }

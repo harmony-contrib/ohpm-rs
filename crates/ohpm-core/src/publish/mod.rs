@@ -41,6 +41,9 @@ pub struct PublishOutcome {
     pub name: String,
     pub version: String,
     pub additional_msg: Option<String>,
+    /// True when the exact package version was already present in the target
+    /// registry and no upload was attempted.
+    pub skipped: bool,
     /// True when this was a `--dry-run` (no upload happened).
     pub dry_run: bool,
     /// Total package size in bytes.
@@ -92,6 +95,7 @@ pub async fn prepublish(config: &Config, req: &PublishRequest) -> Result<Publish
         name,
         version,
         additional_msg: None,
+        skipped: false,
         dry_run: false,
         pkg_size,
         file_num,
@@ -306,6 +310,31 @@ async fn do_publish(
     config: &Config,
     ctx: &PublishContext,
 ) -> Result<PublishOutcome> {
+    // Authenticate before probing so private publish registries can expose
+    // their packuments. If this exact version already exists, publishing is
+    // idempotent: return a skipped outcome without building metadata or
+    // uploading package bytes.
+    let token = auth::resolve_write_token(client.http(), config, &ctx.registry, &ctx.login).await?;
+    if client
+        .is_version_published(
+            &ctx.registry,
+            &ctx.manifest.name,
+            &ctx.manifest.version,
+            &token,
+        )
+        .await?
+    {
+        return Ok(PublishOutcome {
+            name: ctx.manifest.name.clone(),
+            version: ctx.manifest.version.clone(),
+            additional_msg: None,
+            skipped: true,
+            dry_run: false,
+            pkg_size: ctx.size,
+            file_num: ctx.file_num,
+        });
+    }
+
     // Build the metadata document.
     let hsp_meta = match (&ctx.hsp_path, ctx.is_tgz) {
         (Some(hsp), true) => {
@@ -326,9 +355,6 @@ async fn do_publish(
         har_abs: Some(ctx.har_path.clone()),
     };
     let mut metadata = meta::build_har_metadata(&ctx.manifest, &meta_ctx)?;
-
-    // Authentication: env/config token, or non-interactive SSH-key login.
-    let token = auth::resolve_write_token(client.http(), config, &ctx.registry, &ctx.login).await?;
 
     // Upload with retry + stream->attachment fallback.
     let threshold = config.get_number(types::USE_STREAM_THRESHOLD_SIZE).max(0) as u64;
@@ -352,6 +378,7 @@ async fn do_publish(
         name: ctx.manifest.name.clone(),
         version: ctx.manifest.version.clone(),
         additional_msg,
+        skipped: false,
         dry_run: false,
         pkg_size: ctx.size,
         file_num: ctx.file_num,
@@ -396,6 +423,7 @@ async fn do_publish_dry_run(config: &Config, ctx: &PublishContext) -> Result<Pub
         name: ctx.manifest.name.clone(),
         version: ctx.manifest.version.clone(),
         additional_msg: Some(auth_desc),
+        skipped: false,
         dry_run: true,
         pkg_size: ctx.size,
         file_num: ctx.file_num,
