@@ -10,6 +10,7 @@ edition = "2021"
 repository = "https://github.com/harmony-contrib/ohpm-rs"
 
 [workspace.dependencies]
+ohpm-core = { version = "0.2.0", path = "crates/ohpm-core" }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: the reference rewrites manifests/lockfiles with
 # insertion-ordered maps (`JSON.stringify` of parsed JSON5 objects).
