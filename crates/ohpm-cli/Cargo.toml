@@ -14,7 +14,7 @@ name = "ohpm-rs"
 path = "src/main.rs"
 
 [dependencies]
-ohpm-core = { path = "../ohpm-core", version = "0.1.0" }
+ohpm-core.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 tokio.workspace = true

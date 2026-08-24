@@ -9,10 +9,6 @@ keywords = ["openharmony", "harmonyos", "ohpm", "package-manager"]
 categories = ["development-tools::build-utils"]
 description = "Core library reimplementing ohpm (OpenHarmony package manager) capabilities in Rust"
 
-[lib]
-name = "ohpm_core"
-path = "src/lib.rs"
-
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
