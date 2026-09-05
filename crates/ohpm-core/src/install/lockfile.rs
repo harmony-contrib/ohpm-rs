@@ -501,7 +501,6 @@ impl Locker {
         // Specifiers: drop unvisited; collect the surviving values as the
         // visited package keys (the reference additionally protects inner-file
         // dep packages when `enable_lock_inner_pkg_version` is off — deferred).
-        eprintln!("FLUSH-DEBUG2: specifiers={:?}", lockfile.specifiers);
         lockfile.specifiers.retain(|key, value| {
             if !visited_spec_keys.contains(key) {
                 return false;
