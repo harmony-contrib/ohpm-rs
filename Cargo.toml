@@ -3,14 +3,14 @@ resolver = "2"
 members = ["crates/ohpm-core", "crates/ohpm-cli"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 # `UNLICENSED` is not a valid SPDX expression and crates.io rejects it; each
 # crate declares `license-file` (inside its own package dir) instead.
 repository = "https://github.com/harmony-contrib/ohpm-rs"
 
 [workspace.dependencies]
-ohpm-core = { version = "0.2.0", path = "crates/ohpm-core" }
+ohpm-core = { version = "0.3.0", path = "crates/ohpm-core" }
 serde = { version = "1", features = ["derive"] }
 # preserve_order: the reference rewrites manifests/lockfiles with
 # insertion-ordered maps (`JSON.stringify` of parsed JSON5 objects).
