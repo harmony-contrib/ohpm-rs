@@ -1,8 +1,7 @@
 # ohpm-rs
 
 A Rust reimplementation of the **ohpm** (OpenHarmony package manager)
-command-line tool, based on the ohpm source code bundled with DevEco Studio
-6.1.1.280.
+command-line tool.
 
 The headline feature: **`ohpm-rs publish` authenticates entirely from environment
 variables — no TUI prompts.** This makes CI/CD publishing unattended, which the
