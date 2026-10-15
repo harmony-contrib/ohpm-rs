@@ -21,6 +21,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Unit, integration, and CLI tests
-        run: cargo test --workspace --all-targets --locked
+        run: cargo test --workspace --all-targets --locked --no-fail-fast
       - name: Build release CLI
         run: cargo build --release --package ohpm-cli --locked

@@ -160,7 +160,8 @@ mod tests {
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(name.len(), 128, "sha512 hex");
         assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(p.to_string_lossy().contains("/.ohpm/.mtime/"));
+        assert_eq!(p.parent().unwrap().file_name().unwrap(), ".mtime");
+        assert_eq!(p.parent().unwrap().parent().unwrap().file_name().unwrap(), ".ohpm");
     }
 
     #[test]

@@ -282,8 +282,10 @@ mod tests {
         assert!(alarm.messages.is_empty());
 
         // A File dep whose declared key differs from the actual name: recorded.
-        let child = node("foo", "actual-lib", OhpaType::File, "/lib/foo.har");
-        let graph = graph_with(&child, "/lib/foo.har");
+        let directory = tempfile::TempDir::new().unwrap();
+        let spec = crate::paths::PackagePath::serialize(&directory.path().join("foo.har"));
+        let child = node("foo", "actual-lib", OhpaType::File, &spec);
+        let graph = graph_with(&child, &spec);
         let mut alarm = NameInconsistencyAlarm::new(true);
         alarm.record(&graph);
         assert_eq!(alarm.messages.len(), 1);

@@ -363,8 +363,8 @@ mod tests {
         // A missing leaf resolves as an empty local path against the parameter
         // file's directory (the reference's behavior).
         assert_eq!(
-            f.find_version("@param:nope.missing").unwrap(),
-            dir.path().to_string_lossy()
+            std::path::Path::new(&f.find_version("@param:nope.missing").unwrap()),
+            dir.path()
         );
         // A key without the marker passes through unchanged (with a warning).
         assert_eq!(f.find_version("plain").unwrap(), "plain");

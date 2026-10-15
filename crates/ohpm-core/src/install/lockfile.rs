@@ -316,8 +316,9 @@ pub fn relative_spec(root: &Path, spec: &str) -> String {
         spec = rest;
     }
     let p = Path::new(spec);
-    if p.is_absolute() {
-        slash(&relative_path(root, p))
+    if p.has_root() {
+        let resolved = crate::workspace::resolve_file_spec(root, spec);
+        relative_path(root, &resolved)
     } else {
         slash(spec)
     }
@@ -361,9 +362,7 @@ pub fn resolve_lock_spec(root: &Path, spec_value: &str) -> Result<String> {
 /// Resolve a local spec to a normalized absolute path
 /// (`path.resolve(root, spec)`).
 fn resolve_local(root: &Path, spec: &str) -> String {
-    crate::workspace::resolve_file_spec(root, &format!("file:{spec}"))
-        .to_string_lossy()
-        .into_owned()
+    PackagePath::serialize(&crate::workspace::resolve_file_spec(root, spec))
 }
 
 /// `path.relative` with forward slashes.
@@ -730,22 +729,26 @@ mod tests {
         );
         assert!(parse_spec_key("nonsense").is_err());
 
-        assert_eq!(relative_spec(Path::new("/proj"), "latest"), "latest");
-        assert_eq!(relative_spec(Path::new("/proj"), "^1.0.0"), "^1.0.0");
-        assert_eq!(relative_spec(Path::new("/proj"), "/proj/../lib"), "../lib");
+        let root = if cfg!(windows) { Path::new("C:/proj") } else { Path::new("/proj") };
+        let target = root.join("../lib");
+        assert_eq!(relative_spec(root, "latest"), "latest");
+        assert_eq!(relative_spec(root, "^1.0.0"), "^1.0.0");
+        assert_eq!(relative_spec(root, &PackagePath::serialize(&target)), "../lib");
         assert_eq!(
-            relative_spec(Path::new("/proj/entry"), "/proj/lib"),
+            relative_spec(&root.join("entry"), &PackagePath::serialize(&root.join("lib"))),
             "../lib"
         );
-        assert_eq!(relative_spec(Path::new("/proj"), "file:../lib"), "../lib");
+        assert_eq!(relative_spec(root, "file:../lib"), "../lib");
+        #[cfg(windows)]
+        assert_eq!(relative_spec(root, "/lib"), "../lib");
 
         assert_eq!(
-            resolve_lock_spec(Path::new("/proj"), "foo@1.2.3").unwrap(),
+            resolve_lock_spec(root, "foo@1.2.3").unwrap(),
             "foo@1.2.3"
         );
         assert_eq!(
-            resolve_lock_spec(Path::new("/proj"), "foo@../lib").unwrap(),
-            "foo@/lib"
+            resolve_lock_spec(root, "foo@../lib").unwrap(),
+            if cfg!(windows) { "foo@C:/lib" } else { "foo@/lib" }
         );
     }
 

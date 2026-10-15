@@ -96,8 +96,13 @@ mod tests {
             PackagePath::serialize(Path::new(r"\\?\C:\work\库")),
             "C:/work/库"
         );
+        // Verbatim UNC paths retain their prefix so long-path semantics survive.
         assert_eq!(
             PackagePath::serialize(Path::new(r"\\?\UNC\server\share\库")),
+            "//?/UNC/server/share/库"
+        );
+        assert_eq!(
+            PackagePath::serialize(Path::new(r"\\server\share\库")),
             "//server/share/库"
         );
         assert_eq!(
