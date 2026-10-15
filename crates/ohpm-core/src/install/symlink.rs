@@ -14,9 +14,12 @@ use std::sync::Mutex;
 
 use crate::constants::{HSP_DIR, MY_MODULES, PM_DIR};
 use crate::error::{OhpmError, Result};
+use crate::filesystem::DirectoryLink;
 use crate::install::graph::DependencyGraph;
 use crate::install::spec::{is_local_dependency, OhpaType};
 use crate::install::store::StoreContext;
+#[cfg(test)]
+use crate::paths::PackagePath;
 
 /// `SymlinkDir.js` — create a directory symlink at `link` pointing at `real`
 /// (relative on unix), with overwrite/reuse semantics.
@@ -24,86 +27,15 @@ pub fn symlink_dir(real: &Path, link: &Path) -> Result<()> {
     if real == link {
         return Err(OhpmError::new(
             "SymlinkPathError",
-            format!("The symlink source and target are the same: {}", real.display()),
+            format!(
+                "The symlink source and target are the same: {}",
+                real.display()
+            ),
         ));
     }
-    // Ensure the parent exists so `relative_target` can canonicalize it
-    // (macOS /var -> /private/var would otherwise zero the common prefix).
-    if let Some(parent) = link.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let target = relative_target(real, link);
-    match std::os::unix::fs::symlink(&target, link) {
-        Ok(()) => Ok(()),
-        Err(e) => match e.kind() {
-            std::io::ErrorKind::NotFound => {
-                if let Some(parent) = link.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::os::unix::fs::symlink(&target, link)
-                    .map_err(|e| OhpmError::file_symlink_dir_failed(link, real, &e.to_string()))
-            }
-            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied => {
-                // Overwrite: reuse when the target matches, else unlink+recreate.
-                match std::fs::read_link(link) {
-                    Ok(existing) if existing == target => Ok(()),
-                    _ => {
-                        remove_link_or_dir(link)?;
-                        std::os::unix::fs::symlink(&target, link)
-                            .map_err(|e| OhpmError::file_symlink_dir_failed(link, real, &e.to_string()))
-                    }
-                }
-            }
-            _ => Err(OhpmError::file_symlink_dir_failed(link, real, &e.to_string())),
-        },
-    }
-}
-
-/// `path.relative(dirname(link), real)` — forward slashes. Both sides are
-/// canonicalized first (workspace member dirs are canonicalized during
-/// discovery; on macOS `/var` is a symlink to `/private/var`, which would
-/// otherwise zero out the common prefix).
-fn relative_target(real: &Path, link: &Path) -> PathBuf {
-    let real = real.canonicalize().unwrap_or_else(|_| real.to_path_buf());
-    // The link itself does not exist yet — canonicalize its parent instead.
-    let from = match link.parent() {
-        Some(p) => p
-            .canonicalize()
-            .unwrap_or_else(|_| p.to_path_buf())
-            .join(link.file_name().unwrap_or_default()),
-        None => link.to_path_buf(),
-    };
-    let from = from.parent().unwrap_or_else(|| Path::new("."));
-    let from_parts: Vec<_> = from.components().collect();
-    let to_parts: Vec<_> = real.components().collect();
-    let mut common = 0;
-    while common < from_parts.len() && common < to_parts.len() && from_parts[common] == to_parts[common] {
-        common += 1;
-    }
-    let mut parts: Vec<std::path::Component> = (0..from_parts.len() - common)
-        .map(|_| std::path::Component::ParentDir)
-        .collect();
-    for c in &to_parts[common..] {
-        parts.push(*c);
-    }
-    let mut out = PathBuf::new();
-    for p in parts {
-        out.push(p);
-    }
-    out
-}
-
-/// Remove an existing link (or a plain dir that occupies the link path).
-fn remove_link_or_dir(path: &Path) -> Result<()> {
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
-        std::fs::remove_file(path)?;
-    } else if meta.is_dir() {
-        std::fs::remove_dir_all(path)?;
-    } else {
-        std::fs::remove_file(path)?;
-    }
-    Ok(())
+    DirectoryLink::new(real, link)
+        .ensure()
+        .map_err(|e| OhpmError::file_symlink_dir_failed(link, real, &e.to_string()))
 }
 
 /// `deleteUselessLinks.js` — remove entries of `dir` not kept by `keep`
@@ -124,7 +56,7 @@ pub fn delete_useless_links(dir: &Path, keep: &dyn Fn(&str) -> bool) -> Result<(
         let full = entry.path();
         if !name.starts_with('@') {
             if !keep(&name) {
-                let _ = std::fs::remove_dir_all(&full);
+                let _ = DirectoryLink::remove_entry(&full);
                 log::info!("remove useless folder succeed: {}", full.display());
             }
             continue;
@@ -139,7 +71,7 @@ pub fn delete_useless_links(dir: &Path, keep: &dyn Fn(&str) -> bool) -> Result<(
         let mut remaining = children.len();
         for child in children {
             if !keep(&format!("{name}/{child}")) {
-                let _ = std::fs::remove_dir_all(full.join(&child));
+                let _ = DirectoryLink::remove_entry(&full.join(&child));
                 remaining -= 1;
             }
         }
@@ -251,12 +183,9 @@ fn symlink_node(
     let keep: Vec<String> = std::iter::once(node.data.name.clone())
         .chain(node.requirements.keys().cloned())
         .collect();
-    delete_useless_links(
-        &save_root_oh_modules,
-        &|name| {
-            node.data.ohpa_type == OhpaType::SourceCode || keep.iter().any(|k| k == name)
-        },
-    )?;
+    delete_useless_links(&save_root_oh_modules, &|name| {
+        node.data.ohpa_type == OhpaType::SourceCode || keep.iter().any(|k| k == name)
+    })?;
     if node.requirements.is_empty() {
         return Ok(());
     }
@@ -286,7 +215,7 @@ mod tests {
         let real = Path::new("/proj/oh_modules/.ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/foo");
         let link = Path::new("/proj/oh_modules/@ohos/foo");
         assert_eq!(
-            relative_target(real, link),
+            PackagePath::relative(link.parent().unwrap(), real),
             PathBuf::from("../.ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/foo")
         );
     }
@@ -299,7 +228,10 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         let link = dir.path().join("link");
         symlink_dir(&real, &link).unwrap();
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("real"));
         // Reuse when identical.
         symlink_dir(&real, &link).unwrap();
@@ -310,7 +242,6 @@ mod tests {
         assert_eq!(std::fs::read_link(&link).unwrap(), PathBuf::from("real2"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn delete_useless_links_behavior() {
         let dir = tempfile::TempDir::new().unwrap();

@@ -93,8 +93,22 @@ installation (`config/`, `core/registry/`, `core/publish/`, `core/package/`).
 
 ```sh
 cargo build --workspace        # binary: target/debug/ohpm-rs
-cargo test  --workspace        # 201 tests: unit + mock-registry integration
+cargo test  --workspace        # unit, mock-registry, and real-CLI tests
 ```
+
+### Host platforms
+
+The source build supports Linux, Windows, and macOS. Package directory links use
+relative symlinks on Unix and NTFS junctions on Windows; junctions do not require
+administrator privileges or Developer Mode. File links in archives and Git
+dependencies are restored after their targets, with a hard-link fallback on
+Windows when symbolic-link privileges are unavailable.
+
+GitHub Actions runs the complete workspace test suite and a release CLI build on
+Ubuntu, Windows, and macOS. CLI integration tests execute real installs, reinstalls,
+workspace retargeting, cleanup, local HAR installs, packing, prepublish checks, and
+unified version changes under paths containing spaces and Unicode. Registry tests
+use local mock servers and need no publishing credentials.
 
 ## Environment-variable authentication (CI)
 

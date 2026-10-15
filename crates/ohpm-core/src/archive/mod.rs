@@ -12,6 +12,8 @@ use std::path::Path;
 
 use crate::constants::{HAR_SUFFIX, HSP_SUFFIX, TGZ_SUFFIX};
 use crate::error::{OhpmError, Result};
+use crate::filesystem::LinkPlan;
+use crate::paths::PackagePath;
 
 /// A single entry discovered by [`list`].
 #[derive(Debug, Clone)]
@@ -55,6 +57,7 @@ pub fn list(path: &Path) -> Result<Vec<TarEntry>> {
 pub fn extract(path: &Path, dest: &Path, strip: u32, file_list: Option<&[String]>) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     let mut ar = open_reader(path)?;
+    let mut links = LinkPlan::default();
     for entry in ar.entries()? {
         let mut entry = entry?;
         let raw_path = entry.path()?.to_string_lossy().into_owned();
@@ -67,7 +70,8 @@ pub fn extract(path: &Path, dest: &Path, strip: u32, file_list: Option<&[String]
         if rel.is_empty() {
             continue;
         }
-        let out_path = dest.join(rel);
+        let out_path = PackagePath::archive_entry(dest, &rel)
+            .map_err(|error| OhpmError::new("DepInstallDirectoryTraversal", error.to_string()))?;
         if entry.header().entry_type().is_dir() {
             std::fs::create_dir_all(&out_path)?;
             continue;
@@ -78,17 +82,14 @@ pub fn extract(path: &Path, dest: &Path, strip: u32, file_list: Option<&[String]
         if entry.header().entry_type().is_symlink() {
             // Recreate the symlink rather than writing an empty file.
             let target = entry.header().link_name()?.unwrap_or_default();
-            let _ = std::fs::remove_file(&out_path);
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&target, &out_path)?;
-            #[cfg(not(unix))]
-            std::fs::write(&out_path, b"")?;
+            links.push(target.into_owned(), out_path);
             continue;
         }
         let mut f = File::create(&out_path)?;
         std::io::copy(&mut entry, &mut f)?;
         f.flush()?;
     }
+    links.apply()?;
     Ok(())
 }
 
@@ -110,6 +111,7 @@ fn is_traversal_entry(path: &str) -> bool {
 pub fn extract_ignore_dir(path: &Path, dest: &Path, strip: u32, ignore_dir: &str) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     let mut ar = open_reader(path)?;
+    let mut links = LinkPlan::default();
     for entry in ar.entries()? {
         let mut entry = entry?;
         // Use the raw (unvalidated) path — the reference's tar_rs lists
@@ -129,7 +131,8 @@ pub fn extract_ignore_dir(path: &Path, dest: &Path, strip: u32, ignore_dir: &str
         if rel.is_empty() {
             continue;
         }
-        let out_path = dest.join(rel);
+        let out_path = PackagePath::archive_entry(dest, &rel)
+            .map_err(|error| OhpmError::new("DepInstallDirectoryTraversal", error.to_string()))?;
         if entry.header().entry_type().is_dir() {
             std::fs::create_dir_all(&out_path)?;
             continue;
@@ -139,17 +142,14 @@ pub fn extract_ignore_dir(path: &Path, dest: &Path, strip: u32, ignore_dir: &str
         }
         if entry.header().entry_type().is_symlink() {
             let target = entry.header().link_name()?.unwrap_or_default();
-            let _ = std::fs::remove_file(&out_path);
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&target, &out_path)?;
-            #[cfg(not(unix))]
-            std::fs::write(&out_path, b"")?;
+            links.push(target.into_owned(), out_path);
             continue;
         }
         let mut f = File::create(&out_path)?;
         std::io::copy(&mut entry, &mut f)?;
         f.flush()?;
     }
+    links.apply()?;
     Ok(())
 }
 
@@ -204,7 +204,10 @@ pub fn read_entry_content(path: &Path, entry_path: &str) -> Result<Vec<u8>> {
     }
     Err(OhpmError::new(
         "EntryNotFound",
-        format!("The archive \"{}\" does not contain \"{entry_path}\".", path.display()),
+        format!(
+            "The archive \"{}\" does not contain \"{entry_path}\".",
+            path.display()
+        ),
     ))
 }
 
@@ -227,17 +230,28 @@ pub fn find_manifest_entry(path: &Path) -> Result<String> {
     if candidates.is_empty() {
         return Err(OhpmError::new(
             "ManifestNotFound",
-            format!("No {} found in \"{}\".", crate::constants::MY_PACKAGE_JSON, path.display()),
+            format!(
+                "No {} found in \"{}\".",
+                crate::constants::MY_PACKAGE_JSON,
+                path.display()
+            ),
         ));
     }
     let depth = |p: &str| p.split('/').count();
     let min_depth = candidates.iter().map(|p| depth(p)).min().unwrap();
-    let shallowest: Vec<&&str> = candidates.iter().filter(|p| depth(p) == min_depth).collect();
+    let shallowest: Vec<&&str> = candidates
+        .iter()
+        .filter(|p| depth(p) == min_depth)
+        .collect();
     match shallowest.len() {
         1 => Ok(shallowest[0].to_string()),
         _ => Err(OhpmError::new(
             "ManifestAmbiguous",
-            format!("Multiple {} entries found in \"{}\".", crate::constants::MY_PACKAGE_JSON, path.display()),
+            format!(
+                "Multiple {} entries found in \"{}\".",
+                crate::constants::MY_PACKAGE_JSON,
+                path.display()
+            ),
         )),
     }
 }
@@ -251,9 +265,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(src.join("package/entry")).unwrap();
-        let manifest = format!(
-            "{{ name: \"{name}\", version: \"{version}\", main: \"index.ets\" }}\n"
-        );
+        let manifest =
+            format!("{{ name: \"{name}\", version: \"{version}\", main: \"index.ets\" }}\n");
         std::fs::write(src.join("package/oh-package.json5"), manifest).unwrap();
         std::fs::write(src.join("package/entry/index.ets"), "export {}").unwrap();
 
@@ -280,11 +293,13 @@ mod tests {
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Symlink);
         header.set_size(0);
-        tar.append_link(&mut header, "package/link", "target-file").unwrap();
+        tar.append_link(&mut header, "package/link", "target-file")
+            .unwrap();
         let mut data_header = tar::Header::new_gnu();
         data_header.set_size(4);
         data_header.set_mode(0o644);
-        tar.append_data(&mut data_header, "package/real", &b"data"[..]).unwrap();
+        tar.append_data(&mut data_header, "package/real", &b"data"[..])
+            .unwrap();
         let enc = tar.into_inner().unwrap();
         enc.finish().unwrap();
 
@@ -297,6 +312,43 @@ mod tests {
             std::path::PathBuf::from("target-file")
         );
         assert_eq!(std::fs::read(dest.join("real")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn extraction_preserves_forward_file_directory_and_chained_links() {
+        let dir = TempDir::new().unwrap();
+        let har = dir.path().join("links.har");
+        let enc = flate2::write::GzEncoder::new(
+            File::create(&har).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut tar = tar::Builder::new(enc);
+        for (name, target) in [("alias", "real"), ("chain", "alias"), ("folder", "assets")] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            tar.append_link(&mut header, format!("package/{name}"), target)
+                .unwrap();
+        }
+        for name in ["real", "assets/content"] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(7);
+            header.set_mode(0o644);
+            tar.append_data(&mut header, format!("package/{name}"), &b"payload"[..])
+                .unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap();
+        for ignore in [false, true] {
+            let dest = dir.path().join(if ignore { "ignore" } else { "plain" });
+            if ignore {
+                extract_ignore_dir(&har, &dest, 1, ".CodeSignature").unwrap();
+            } else {
+                extract(&har, &dest, 1, None).unwrap();
+            }
+            for name in ["alias", "chain", "folder/content"] {
+                assert_eq!(std::fs::read(dest.join(name)).unwrap(), b"payload");
+            }
+        }
     }
 
     #[test]
@@ -318,7 +370,10 @@ mod tests {
             "package/src/main/cpp/types/libfoo/oh-package.json5",
             "{ name: \"libfoo.so\", version: \"1.0.0\" }\n",
         );
-        add("package/src/main/cpp/types/libfoo/Index.d.ts", "declare const x: number;\n");
+        add(
+            "package/src/main/cpp/types/libfoo/Index.d.ts",
+            "declare const x: number;\n",
+        );
 
         let entry = find_manifest_entry(&har).unwrap();
         assert_eq!(entry, "package/oh-package.json5", "the root manifest wins");
@@ -344,8 +399,10 @@ mod tests {
         let f = File::create(&tgz_path).unwrap();
         let enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
         let mut tar = tar::Builder::new(enc);
-        tar.append_file("libs/a.har", &mut File::open(&har).unwrap()).unwrap();
-        tar.append_file("libs/b.hsp", &mut File::open(&har).unwrap()).unwrap();
+        tar.append_file("libs/a.har", &mut File::open(&har).unwrap())
+            .unwrap();
+        tar.append_file("libs/b.hsp", &mut File::open(&har).unwrap())
+            .unwrap();
         let enc = tar.into_inner().unwrap();
         enc.finish().unwrap();
 

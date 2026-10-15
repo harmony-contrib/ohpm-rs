@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use crate::error::{OhpmError, Result};
+use crate::filesystem::LinkPlan;
 use crate::install::semver::semver_max_satisfying;
 
 /// A parsed git fragment after the `#` (mirrors pnpm's fragment syntax).
@@ -27,10 +28,7 @@ pub enum GitQuery {
     /// `semver:<range>` — the max satisfying tag.
     Semver(String),
     /// `#path:<subdir>` (optionally combined with another fragment via `&`).
-    Path {
-        sub: String,
-        inner: Box<GitQuery>,
-    },
+    Path { sub: String, inner: Box<GitQuery> },
 }
 
 /// Parse a git spec (`<url>#<fragment>`), mirroring pnpm's fragment grammar.
@@ -83,9 +81,8 @@ pub fn sub_dir_of(query: &GitQuery) -> Option<&str> {
 
 /// `prepare_clone` + `fetch_only` (full fetch of all refs).
 pub fn fetch_repo(url: &str, tmp: &Path) -> Result<gix::Repository> {
-    let mut prep = gix::prepare_clone(url, tmp).map_err(|e| {
-        OhpmError::git_ls_remote_failed(url, &e.to_string())
-    })?;
+    let mut prep = gix::prepare_clone(url, tmp)
+        .map_err(|e| OhpmError::git_ls_remote_failed(url, &e.to_string()))?;
     let (repo, _outcome) = prep
         .fetch_only(gix::progress::Discard, &AtomicBool::new(false))
         .map_err(|e| OhpmError::git_ls_remote_failed(url, &e.to_string()))?;
@@ -114,10 +111,7 @@ pub fn resolve_commit_in(repo: &gix::Repository, query: &GitQuery) -> Result<Str
                     return Ok(sha);
                 }
             }
-            Err(OhpmError::git_ref_not_found(
-                &repo_path(repo),
-                r,
-            ))
+            Err(OhpmError::git_ref_not_found(&repo_path(repo), r))
         }
         GitQuery::Semver(range) => {
             let tags = tag_names(repo)?;
@@ -139,10 +133,7 @@ pub fn resolve_commit_in(repo: &gix::Repository, query: &GitQuery) -> Result<Str
                         .unwrap_or(normalized);
                     rev_parse(repo, &format!("refs/tags/{tag}^{{}}"))
                 }
-                None => Err(OhpmError::git_semver_no_match(
-                    &repo_path(repo),
-                    range,
-                )),
+                None => Err(OhpmError::git_semver_no_match(&repo_path(repo), range)),
             }
         }
         GitQuery::Path { inner, .. } => resolve_commit_in(repo, inner),
@@ -169,8 +160,13 @@ fn repo_path(repo: &gix::Repository) -> String {
 /// All `refs/tags/<name>` names (deduplicated, `^{}` suffix stripped).
 fn tag_names(repo: &gix::Repository) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    let refs = repo.references().map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(repo), &e.to_string()))?;
-    for r in refs.all().map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(repo), &e.to_string()))? {
+    let refs = repo
+        .references()
+        .map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(repo), &e.to_string()))?;
+    for r in refs
+        .all()
+        .map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(repo), &e.to_string()))?
+    {
         let r = r.map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(repo), &e.to_string()))?;
         let name = r.name().as_bstr().to_string();
         if let Some(tag) = name.strip_prefix("refs/tags/") {
@@ -192,27 +188,25 @@ pub fn materialize_commit_in(
     sub_dir: Option<&str>,
     dest: &Path,
 ) -> Result<()> {
-    let id = gix::ObjectId::from_hex(commit.as_bytes()).map_err(|e| {
-        OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string())
-    })?;
-    let commit_obj = repo.find_commit(id).map_err(|e| {
-        OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string())
-    })?;
+    let id = gix::ObjectId::from_hex(commit.as_bytes())
+        .map_err(|e| OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string()))?;
+    let commit_obj = repo
+        .find_commit(id)
+        .map_err(|e| OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string()))?;
     let tree_id = commit_obj
         .tree_id()
         .map_err(|e| OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string()))?;
-    let tree = repo.find_tree(tree_id).map_err(|e| {
-        OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string())
-    })?;
+    let tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string()))?;
     let tree = match sub_dir {
         Some(sub) => descend(repo, &tree, sub).map_err(|e| {
             OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string())
         })?,
         None => tree,
     };
-    write_tree(repo, &tree, dest).map_err(|e| {
-        OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string())
-    })?;
+    write_tree(repo, &tree, dest)
+        .map_err(|e| OhpmError::git_checkout_failed(&repo_path(repo), commit, &e.to_string()))?;
     // Drop the clone metadata: the store must not contain `.git`.
     let _ = std::fs::remove_dir_all(repo.git_dir());
     let _ = std::fs::remove_file(dest.join(".git"));
@@ -220,11 +214,14 @@ pub fn materialize_commit_in(
 }
 
 /// Descend into a subdirectory of the tree.
-fn descend<'a>(repo: &'a gix::Repository, tree: &gix::Tree<'a>, sub: &str) -> Result<gix::Tree<'a>> {
+fn descend<'a>(
+    repo: &'a gix::Repository,
+    tree: &gix::Tree<'a>,
+    sub: &str,
+) -> Result<gix::Tree<'a>> {
     let mut current = tree.clone();
-    let not_found = |detail: &str| {
-        OhpmError::git_ref_not_found(&repo.path().display().to_string(), detail)
-    };
+    let not_found =
+        |detail: &str| OhpmError::git_ref_not_found(&repo.path().display().to_string(), detail);
     for part in sub.split('/').filter(|p| !p.is_empty()) {
         let mut found = None;
         for entry in current.iter() {
@@ -233,7 +230,10 @@ fn descend<'a>(repo: &'a gix::Repository, tree: &gix::Tree<'a>, sub: &str) -> Re
                 if entry.mode().kind() != gix::object::tree::EntryKind::Tree {
                     return Err(not_found(sub));
                 }
-                found = Some(repo.find_tree(entry.id()).map_err(|e| not_found(&e.to_string()))?);
+                found = Some(
+                    repo.find_tree(entry.id())
+                        .map_err(|e| not_found(&e.to_string()))?,
+                );
                 break;
             }
         }
@@ -244,7 +244,23 @@ fn descend<'a>(repo: &'a gix::Repository, tree: &gix::Tree<'a>, sub: &str) -> Re
 
 /// Recursively write a tree into `dest` (blobs as files, links as symlinks,
 /// submodules skipped).
-fn write_tree(repo: &gix::Repository, tree: &gix::Tree<'_>, dest: &Path) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn write_tree(
+    repo: &gix::Repository,
+    tree: &gix::Tree<'_>,
+    dest: &Path,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut links = LinkPlan::default();
+    write_tree_entries(repo, tree, dest, &mut links)?;
+    links.apply()?;
+    Ok(())
+}
+
+fn write_tree_entries(
+    repo: &gix::Repository,
+    tree: &gix::Tree<'_>,
+    dest: &Path,
+    links: &mut LinkPlan,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     std::fs::create_dir_all(dest)?;
     for entry in tree.iter() {
         let entry = entry?;
@@ -253,7 +269,7 @@ fn write_tree(repo: &gix::Repository, tree: &gix::Tree<'_>, dest: &Path) -> std:
         match entry.mode().kind() {
             gix::object::tree::EntryKind::Tree => {
                 let t = repo.find_tree(entry.id())?;
-                write_tree(repo, &t, &out)?;
+                write_tree_entries(repo, &t, &out, links)?;
             }
             gix::object::tree::EntryKind::Blob | gix::object::tree::EntryKind::BlobExecutable => {
                 let obj = repo.find_object(entry.id())?;
@@ -264,10 +280,7 @@ fn write_tree(repo: &gix::Repository, tree: &gix::Tree<'_>, dest: &Path) -> std:
                 let obj = repo.find_object(entry.id())?;
                 let blob = obj.into_blob();
                 let target = String::from_utf8_lossy(&blob.data);
-                #[cfg(unix)]
-                std::os::unix::fs::symlink(target.as_ref(), &out)?;
-                #[cfg(not(unix))]
-                std::fs::write(&out, target.as_bytes())?;
+                links.push(std::path::PathBuf::from(target.as_ref()), out);
             }
             gix::object::tree::EntryKind::Commit => {
                 // Submodule — skipped, like the reference's clone handling.
@@ -297,7 +310,7 @@ mod tests {
             run(repo.as_path(), &["init", "-q"]);
             Fixture {
                 dir,
-                url: format!("file://{}", repo.display()),
+                url: url::Url::from_directory_path(&repo).unwrap().to_string(),
             }
         }
 
@@ -318,17 +331,27 @@ mod tests {
             let repo = self.dir.path().join("repo");
             run(repo.as_path(), &["tag", tag]);
         }
-
     }
 
     fn run(dir: &Path, args: &[&str]) {
-        let status = Command::new("git").args(args).current_dir(dir).status().unwrap();
+        let status = Command::new("git")
+            .env("GIT_AUTHOR_NAME", "ohpm test")
+            .env("GIT_AUTHOR_EMAIL", "ohpm@example.invalid")
+            .env("GIT_COMMITTER_NAME", "ohpm test")
+            .env("GIT_COMMITTER_EMAIL", "ohpm@example.invalid")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
         assert!(status.success(), "git {args:?} failed");
     }
 
     #[test]
     fn parse_fragments() {
-        assert_eq!(parse_git_spec("git+https://x/y.git").unwrap(), GitQuery::Head);
+        assert_eq!(
+            parse_git_spec("git+https://x/y.git").unwrap(),
+            GitQuery::Head
+        );
         assert_eq!(
             parse_git_spec("git+https://x/y.git#v1.0.0").unwrap(),
             GitQuery::Ref("v1.0.0".into())
@@ -368,7 +391,10 @@ mod tests {
     #[test]
     fn resolve_and_materialize() {
         let fx = Fixture::new();
-        fx.write("oh-package.json5", "{ name: \"foo\", version: \"1.0.0\" }\n");
+        fx.write(
+            "oh-package.json5",
+            "{ name: \"foo\", version: \"1.0.0\" }\n",
+        );
         fx.write("src/a.ets", "export {}\n");
         fx.commit("init");
         fx.tag("v1.0.0");
@@ -415,7 +441,13 @@ mod tests {
 
         // Materialize the v1.0.0 content (only the first commit's files).
         let dest = fx.dir.path().join("out");
-        materialize_commit_in(&repo, &resolve_commit_in(&repo, &GitQuery::Ref("v1.0.0".into())).unwrap(), None, &dest).unwrap();
+        materialize_commit_in(
+            &repo,
+            &resolve_commit_in(&repo, &GitQuery::Ref("v1.0.0".into())).unwrap(),
+            None,
+            &dest,
+        )
+        .unwrap();
         assert!(dest.join("oh-package.json5").is_file());
         assert!(dest.join("src/a.ets").is_file());
     }
@@ -423,7 +455,10 @@ mod tests {
     #[test]
     fn materialize_has_no_git_dir() {
         let fx = Fixture::new();
-        fx.write("oh-package.json5", "{ name: \"foo\", version: \"1.0.0\" }\n");
+        fx.write(
+            "oh-package.json5",
+            "{ name: \"foo\", version: \"1.0.0\" }\n",
+        );
         fx.commit("init");
 
         let tmp = fx.dir.path().join("clone");

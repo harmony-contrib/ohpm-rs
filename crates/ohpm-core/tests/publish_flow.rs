@@ -116,7 +116,7 @@ fn encrypted_key_pem(passphrase: &str) -> String {
 fn load_config(home: &Path) -> Config {
     // Isolate the user-level `.ohpmrc` so tests don't read the developer's.
     std::env::set_var("HOME", home);
-    let mut cfg = Config::new();
+    let mut cfg = Config::with_user_rc(home.join(".ohpm/.ohpmrc"));
     cfg.load(Path::new("."), None).unwrap();
     cfg
 }

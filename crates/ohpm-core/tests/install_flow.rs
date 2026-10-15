@@ -257,7 +257,7 @@ fn load_config(home: &Path, registry_url: &str, cache: &Path) -> Config {
     std::env::set_var("OHPM_REGISTRY", registry_url);
     std::env::set_var("OHPM_CACHE", cache);
     std::env::set_var("OHPM_LOG_LEVEL", "error");
-    let mut cfg = Config::new();
+    let mut cfg = Config::with_user_rc(home.join(".ohpm/.ohpmrc"));
     cfg.load(Path::new("."), None).unwrap();
     cfg
 }

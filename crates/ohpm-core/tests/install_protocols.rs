@@ -169,7 +169,7 @@ fn load_config(home: &Path, registry_url: &str, cache: &Path) -> Config {
     std::env::set_var("OHPM_REGISTRY", registry_url);
     std::env::set_var("OHPM_CACHE", cache);
     std::env::set_var("OHPM_LOG_LEVEL", "error");
-    let mut cfg = Config::new();
+    let mut cfg = Config::with_user_rc(home.join(".ohpm/.ohpmrc"));
     cfg.load(Path::new("."), None).unwrap();
     cfg
 }
@@ -211,13 +211,18 @@ impl GitFixture {
         Self::run(&repo, &["init", "-q"]);
         GitFixture {
             _dir: dir,
-            url: format!("file://{}", repo.display()),
+            url: url::Url::from_directory_path(&repo).unwrap().to_string(),
             repo,
         }
     }
 
     fn run(repo: &Path, args: &[&str]) {
-        let status = Command::new("git").args(args).current_dir(repo).status().unwrap();
+        let status = Command::new("git")
+            .env("GIT_AUTHOR_NAME", "ohpm test")
+            .env("GIT_AUTHOR_EMAIL", "ohpm@example.invalid")
+            .env("GIT_COMMITTER_NAME", "ohpm test")
+            .env("GIT_COMMITTER_EMAIL", "ohpm@example.invalid")
+            .args(args).current_dir(repo).status().unwrap();
         assert!(status.success(), "git {args:?} failed");
     }
 

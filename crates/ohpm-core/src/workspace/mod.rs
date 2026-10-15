@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use crate::constants::{HAR_SUFFIX, MY_PACKAGE_JSON, TGZ_SUFFIX};
 use crate::error::{OhpmError, Result};
 use crate::package::{self, Manifest};
+use crate::paths::PackagePath;
 
 /// The workspace config filename at the workspace root.
 pub const WORKSPACE_CONFIG: &str = "ohpm-workspace.yaml";
@@ -75,7 +76,10 @@ pub enum WorkspaceQuery {
     /// A path form (`workspace:./foo`, `workspace:../foo`).
     Path(String),
     /// The alias form (`workspace:foo@*`, `workspace:foo@^1.0.0`).
-    Alias { member: String, range: Option<String> },
+    Alias {
+        member: String,
+        range: Option<String>,
+    },
 }
 
 impl WorkspaceQuery {
@@ -116,12 +120,11 @@ pub fn resolve_workspace_version(
             Ok(member_version.to_string())
         }
         WorkspaceQuery::Alias { range: None, .. } => Ok(member_version.to_string()),
-        WorkspaceQuery::Range(range) | WorkspaceQuery::Alias { range: Some(range), .. } => {
-            crate::install::semver::semver_max_satisfying(&[member_version.to_string()], range)
-                .ok_or_else(|| {
-                    OhpmError::workspace_no_matching_version(name, range, member_version)
-                })
-        }
+        WorkspaceQuery::Range(range)
+        | WorkspaceQuery::Alias {
+            range: Some(range), ..
+        } => crate::install::semver::semver_max_satisfying(&[member_version.to_string()], range)
+            .ok_or_else(|| OhpmError::workspace_no_matching_version(name, range, member_version)),
         WorkspaceQuery::Path(_) => Ok(member_version.to_string()),
     }
 }
@@ -145,7 +148,7 @@ impl Workspace {
     pub fn load(root: &Path) -> Result<Workspace> {
         // Canonicalize so member dirs (canonicalized during discovery) can be
         // compared against the root for exclude-path matching.
-        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let root = PackagePath::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         let config_path = root.join(WORKSPACE_CONFIG);
         let text = std::fs::read_to_string(&config_path).map_err(|e| {
             OhpmError::new(
@@ -299,7 +302,7 @@ fn discover_members(root: &Path, patterns: &[String], exclude: &[String]) -> Res
         } else {
             root.join(pattern)
         };
-        let pattern_str = full.to_string_lossy().into_owned();
+        let pattern_str = PackagePath::serialize(&full);
         let entries = glob::glob(&pattern_str)
             .map_err(|e| OhpmError::new("WorkspaceGlobError", format!("{pattern_str}: {e}")))?;
         for entry in entries.flatten() {
@@ -339,9 +342,7 @@ fn is_excluded(root: &Path, dir: &Path, name: &str, exclude: &[String]) -> bool 
     if exclude.iter().any(|e| e == name) {
         return true;
     }
-    let rel = dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().into_owned();
-    // Glob patterns use '/' separators; normalize the path on Windows.
-    let rel = rel.replace('\\', "/");
+    let rel = PackagePath::serialize(dir.strip_prefix(root).unwrap_or(dir));
     exclude.iter().any(|e| {
         glob::Pattern::new(e)
             .map(|p| p.matches(&rel))
@@ -685,11 +686,17 @@ version:
     #[test]
     fn find_from_member_dir() {
         let root = TempDir::new().unwrap();
-        write(&root.path(), WORKSPACE_CONFIG, "packages:\n  - packages/*\n");
+        write(
+            &root.path(),
+            WORKSPACE_CONFIG,
+            "packages:\n  - packages/*\n",
+        );
         write_pkg(&root.path(), "packages/a", "pkg.a", "1.0.0");
         write_pkg(&root.path(), "packages/b", "pkg.b", "2.0.0");
 
-        let ws = Workspace::find(&root.path().join("packages/a")).unwrap().unwrap();
+        let ws = Workspace::find(&root.path().join("packages/a"))
+            .unwrap()
+            .unwrap();
         assert_eq!(ws.members.len(), 2);
         let by_name = ws.members_by_name();
         assert_eq!(by_name.get("pkg.b").unwrap().manifest.version, "2.0.0");
@@ -714,14 +721,26 @@ version:
         write_pkg(&root.path(), "packages/b", "pkg.b", "2.0.0");
 
         let ws = Workspace::load(root.path()).unwrap();
-        let names: Vec<&str> = ws.members.iter().map(|m| m.manifest.name.as_str()).collect();
-        assert_eq!(names, vec!["pkg.a"], "internal (path) and pkg.b (name) are excluded");
+        let names: Vec<&str> = ws
+            .members
+            .iter()
+            .map(|m| m.manifest.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["pkg.a"],
+            "internal (path) and pkg.b (name) are excluded"
+        );
     }
 
     #[test]
     fn filtered_members_select_and_validate() {
         let root = TempDir::new().unwrap();
-        write(&root.path(), WORKSPACE_CONFIG, "packages:\n  - packages/*\n");
+        write(
+            &root.path(),
+            WORKSPACE_CONFIG,
+            "packages:\n  - packages/*\n",
+        );
         write_pkg(&root.path(), "packages/a", "pkg.a", "1.0.0");
         write_pkg(&root.path(), "packages/b", "pkg.b", "2.0.0");
 
@@ -752,10 +771,19 @@ version:
     #[test]
     fn resolve_file_spec_variants() {
         let base = Path::new("/tmp/ws/packages/a");
-        assert_eq!(resolve_file_spec(base, "file:../b"), Path::new("/tmp/ws/packages/b"));
-        assert_eq!(resolve_file_spec(base, "file:./lib"), Path::new("/tmp/ws/packages/a/lib"));
+        assert_eq!(
+            resolve_file_spec(base, "file:../b"),
+            Path::new("/tmp/ws/packages/b")
+        );
+        assert_eq!(
+            resolve_file_spec(base, "file:./lib"),
+            Path::new("/tmp/ws/packages/a/lib")
+        );
         assert_eq!(resolve_file_spec(base, "file:/abs/x"), Path::new("/abs/x"));
-        assert_eq!(resolve_file_spec(base, "FILE: ../b"), Path::new("/tmp/ws/packages/b"));
+        assert_eq!(
+            resolve_file_spec(base, "FILE: ../b"),
+            Path::new("/tmp/ws/packages/b")
+        );
         // ~ expansion
         assert!(resolve_file_spec(base, "file:~/pkg").starts_with(dirs::home_dir().unwrap()));
     }
@@ -763,11 +791,17 @@ version:
     #[test]
     fn process_file_dependencies_rewrites() {
         let root = TempDir::new().unwrap();
-        write(&root.path(), WORKSPACE_CONFIG, "packages:\n  - packages/*\n");
+        write(
+            &root.path(),
+            WORKSPACE_CONFIG,
+            "packages:\n  - packages/*\n",
+        );
         write_pkg(&root.path(), "packages/a", "pkg.a", "1.0.0");
         write_pkg(&root.path(), "packages/b", "pkg.b", "2.3.4");
 
-        let ws = Workspace::find(&root.path().join("packages/a")).unwrap().unwrap();
+        let ws = Workspace::find(&root.path().join("packages/a"))
+            .unwrap()
+            .unwrap();
         let mut m = Manifest {
             name: "pkg.a".into(),
             version: "1.0.0".into(),
@@ -790,10 +824,16 @@ version:
     #[test]
     fn unresolvable_dependency_is_error_devdep_kept() {
         let root = TempDir::new().unwrap();
-        write(&root.path(), WORKSPACE_CONFIG, "packages:\n  - packages/*\n");
+        write(
+            &root.path(),
+            WORKSPACE_CONFIG,
+            "packages:\n  - packages/*\n",
+        );
         write_pkg(&root.path(), "packages/a", "pkg.a", "1.0.0");
 
-        let ws = Workspace::find(&root.path().join("packages/a")).unwrap().unwrap();
+        let ws = Workspace::find(&root.path().join("packages/a"))
+            .unwrap()
+            .unwrap();
         let mut m = Manifest {
             name: "pkg.a".into(),
             version: "1.0.0".into(),
@@ -802,7 +842,8 @@ version:
             ..Default::default()
         };
 
-        let err = process_file_dependencies(&ws, &root.path().join("packages/a"), &mut m).unwrap_err();
+        let err =
+            process_file_dependencies(&ws, &root.path().join("packages/a"), &mut m).unwrap_err();
         assert_eq!(err.code, "FileDependencyUnresolvable");
 
         // devDependencies is lenient.
@@ -813,6 +854,9 @@ version:
             ..Default::default()
         };
         process_file_dependencies(&ws, &root.path().join("packages/a"), &mut m2).unwrap();
-        assert_eq!(m2.dev_dependencies.get("missing-dev").unwrap(), "file:../nope");
+        assert_eq!(
+            m2.dev_dependencies.get("missing-dev").unwrap(),
+            "file:../nope"
+        );
     }
 }

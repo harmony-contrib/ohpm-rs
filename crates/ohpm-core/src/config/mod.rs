@@ -37,11 +37,19 @@ pub struct Config {
 
 impl Config {
     pub fn new() -> Self {
-        let data = SOURCE_ORDER.iter().map(|s| (s.to_string(), BTreeMap::new())).collect();
+        Self::with_user_rc(Self::user_rc_path())
+    }
+
+    /// Select an explicit user config file without changing the process home directory.
+    pub fn with_user_rc(user_rc_path: PathBuf) -> Self {
+        let data = SOURCE_ORDER
+            .iter()
+            .map(|s| (s.to_string(), BTreeMap::new()))
+            .collect();
         Self {
             data,
             source_paths: BTreeMap::new(),
-            user_rc_path: Self::user_rc_path(),
+            user_rc_path,
             loaded: false,
         }
     }
@@ -67,7 +75,10 @@ impl Config {
         }
 
         // 1. defaults
-        self.data.get_mut("default").unwrap().extend(default::default_config());
+        self.data
+            .get_mut("default")
+            .unwrap()
+            .extend(default::default_config());
 
         // 2. cli overrides
         if let Some(cli_map) = cli {
@@ -85,7 +96,9 @@ impl Config {
                 }
             }
         }
-        let base = project_root.or(local_prefix).unwrap_or_else(|| cwd.to_path_buf());
+        let base = project_root
+            .or(local_prefix)
+            .unwrap_or_else(|| cwd.to_path_buf());
         let project_rc = base.join(PM_RC);
         if project_rc.exists() {
             self.load_file("project", &project_rc)?;
@@ -109,7 +122,8 @@ impl Config {
 
     fn load_file(&mut self, source: &str, path: &Path) -> Result<()> {
         let map = loader::read_file(path)?;
-        self.source_paths.insert(source.to_string(), path.to_path_buf());
+        self.source_paths
+            .insert(source.to_string(), path.to_path_buf());
         self.data.get_mut(source).unwrap().extend(map);
         Ok(())
     }
@@ -416,7 +430,10 @@ mod tests {
         let project = TempDir::new().unwrap();
         let cwd = project.path().join("module");
         fs::create_dir_all(&cwd).unwrap();
-        write(&project.path().join(PM_RC), "registry=https://project.example/\n");
+        write(
+            &project.path().join(PM_RC),
+            "registry=https://project.example/\n",
+        );
         // Mark the project root so the .ohpmrc above is picked up.
         write(
             &project.path().join("oh-package.json5"),
@@ -438,7 +455,10 @@ mod tests {
         cfg.user_rc_path = home.path().join(".ohpm/.ohpmrc");
         cfg.load(&dir.path().to_path_buf(), None).unwrap();
         cfg.set("//ohpm.openharmony.cn/ohpm/:_auth", "sekrit");
-        assert_eq!(cfg.access_token("https://ohpm.openharmony.cn/ohpm/", true), "sekrit");
+        assert_eq!(
+            cfg.access_token("https://ohpm.openharmony.cn/ohpm/", true),
+            "sekrit"
+        );
         // Auth index key is not persisted.
         cfg.save().unwrap();
         let saved = fs::read_to_string(&cfg.user_rc_path).unwrap();
