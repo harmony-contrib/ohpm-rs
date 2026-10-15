@@ -61,6 +61,17 @@ impl WorkspaceFixture {
         .unwrap();
     }
 
+    fn member(&self, name: &str, manifest: serde_json::Value) -> PathBuf {
+        let dir = self.root.join("packages").join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("oh-package.json5"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
     fn run(&self, cwd: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_ohpm-rs"))
             .args(args)
@@ -82,6 +93,168 @@ impl WorkspaceFixture {
         );
         output
     }
+}
+
+#[test]
+fn workspace_install_includes_unreferenced_private_members_and_dev_dependencies() {
+    let fixture = WorkspaceFixture::new();
+    let private = fixture.member(
+        "private",
+        json!({
+            "name": "@fixture/private", "version": "1.0.0", "publish": false,
+            "devDependencies": {"@fixture/library": "workspace:*"}
+        }),
+    );
+    let excluded = fixture.member(
+        "excluded",
+        json!({
+            "name": "@fixture/excluded", "version": "1.0.0",
+            "dependencies": {"@fixture/missing": "workspace:*"}
+        }),
+    );
+    fs::write(
+        fixture.root.join("ohpm-workspace.yaml"),
+        "packages:\n  - 'packages/*'\nexclude:\n  - 'packages/excluded'\n",
+    )
+    .unwrap();
+    assert!(!fixture.root.join("oh-package.json5").exists());
+    fixture.succeed(&fixture.root, &["install", "--workspace"]);
+    for dir in [&fixture.app, &private] {
+        assert_eq!(
+            dir.join("oh_modules/@fixture/library")
+                .canonicalize()
+                .unwrap(),
+            fixture.library.canonicalize().unwrap()
+        );
+    }
+    assert!(!excluded.join("oh_modules").exists());
+    let first_lock = fs::read(private.join("oh-package-lock.json5")).unwrap();
+    fixture.succeed(&fixture.app, &["install", "--workspace"]);
+    assert_eq!(
+        fs::read(private.join("oh-package-lock.json5")).unwrap(),
+        first_lock
+    );
+}
+
+#[test]
+fn workspace_install_filter_and_prefix_select_members_from_another_directory() {
+    let fixture = WorkspaceFixture::new();
+    let broken = fixture.member(
+        "broken",
+        json!({
+            "name": "@fixture/broken", "version": "1.0.0",
+            "dependencies": {"@fixture/missing": "workspace:*"}
+        }),
+    );
+    let outside = fixture.root.parent().unwrap();
+    fixture.succeed(
+        outside,
+        &[
+            "install",
+            "--prefix",
+            "workspace space 库",
+            "--filter",
+            "@fixture/app,@fixture/library,@fixture/app",
+        ],
+    );
+    assert_eq!(
+        fixture
+            .app
+            .join("oh_modules/@fixture/library")
+            .canonicalize()
+            .unwrap(),
+        fixture.library.canonicalize().unwrap()
+    );
+    assert!(!broken.join("oh_modules").exists());
+    assert!(!broken.join("oh-package-lock.json5").exists());
+    fixture.succeed(
+        &fixture.app,
+        &["install", "--workspace", "--filter", "@fixture/app"],
+    );
+}
+
+#[test]
+fn workspace_install_validates_scope_and_conflicting_arguments_before_installing() {
+    let fixture = WorkspaceFixture::new();
+    let missing_workspace =
+        fixture.run(fixture.root.parent().unwrap(), &["install", "--workspace"]);
+    assert!(!missing_workspace.status.success());
+    assert!(String::from_utf8_lossy(&missing_workspace.stderr).contains("ohpm-workspace.yaml"));
+    let unknown = fixture.run(
+        &fixture.root,
+        &[
+            "install",
+            "--workspace",
+            "--filter",
+            "@fixture/app,@fixture/unknown",
+        ],
+    );
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("@fixture/unknown"));
+
+    for args in [
+        vec!["install", "--workspace", "@fixture/library"],
+        vec!["install", "--filter", "@fixture/app", "@fixture/library"],
+        vec!["install", "--workspace", "--target_path", "."],
+        vec!["install", "--filter", "@fixture/app", "--target_path", "."],
+        vec!["install", "--workspace", "--prefix", "missing directory"],
+    ] {
+        let result = fixture.run(&fixture.root, &args);
+        assert!(!result.status.success(), "{args:?}");
+    }
+    assert!(!fixture.app.join("oh_modules").exists());
+    assert!(!fixture.app.join("oh-package-lock.json5").exists());
+}
+
+#[test]
+fn workspace_install_all_includes_build_profile_modules() {
+    let fixture = WorkspaceFixture::new();
+    fs::write(fixture.root.join(".ohpmrc"), "install_all=false\n").unwrap();
+    let project = fixture.member(
+        "project",
+        json!({"name": "@fixture/project", "version": "1.0.0", "publish": false}),
+    );
+    let entry = project.join("entry");
+    fs::create_dir_all(&entry).unwrap();
+    fixture.manifest(
+        &entry,
+        "@fixture/entry",
+        json!({"@fixture/library": "workspace:*"}),
+    );
+    fs::write(
+        project.join("build-profile.json5"),
+        serde_json::to_vec(&json!({"modules": [{"name": "entry", "srcPath": "./entry"}]})).unwrap(),
+    )
+    .unwrap();
+    fixture.succeed(&fixture.root, &["install", "--workspace"]);
+    assert!(!entry.join("oh_modules").exists());
+    fixture.succeed(&fixture.root, &["install", "--workspace", "--all"]);
+    assert_eq!(
+        entry
+            .join("oh_modules/@fixture/library")
+            .canonicalize()
+            .unwrap(),
+        fixture.library.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn workspace_install_reports_a_member_failure() {
+    let fixture = WorkspaceFixture::new();
+    fixture.member(
+        "z-broken",
+        json!({
+            "name": "@fixture/broken", "version": "1.0.0",
+            "dependencies": {"@fixture/missing": "workspace:*"}
+        }),
+    );
+    let result = fixture.run(&fixture.root, &["install", "--workspace"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("@fixture/missing"));
+    assert!(fixture
+        .app
+        .join("oh_modules/@fixture/library/oh-package.json5")
+        .is_file());
 }
 
 #[test]
