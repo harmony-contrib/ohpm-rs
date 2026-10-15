@@ -257,7 +257,7 @@ fn load_config(home: &Path, registry_url: &str, cache: &Path) -> Config {
     std::env::set_var("OHPM_REGISTRY", registry_url);
     std::env::set_var("OHPM_CACHE", cache);
     std::env::set_var("OHPM_LOG_LEVEL", "error");
-    let mut cfg = Config::new();
+    let mut cfg = Config::with_user_rc(home.join(".ohpm/.ohpmrc"));
     cfg.load(Path::new("."), None).unwrap();
     cfg
 }
@@ -376,15 +376,13 @@ async fn fresh_install_layout_and_lockfile() {
 
     // 2. oh_modules layout — symlinks into the store.
     let oh_modules = prefix.join("oh_modules");
-    let foo_link = std::fs::read_link(oh_modules.join("@ohos/foo")).unwrap();
     assert_eq!(
-        foo_link,
-        PathBuf::from("../.ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/foo")
+        oh_modules.join("@ohos/foo").canonicalize().unwrap(),
+        oh_modules.join(".ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/foo").canonicalize().unwrap()
     );
-    let bar_link = std::fs::read_link(oh_modules.join(".ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/bar")).unwrap();
     assert_eq!(
-        bar_link,
-        PathBuf::from("../../../@ohos+bar@1.0.0/oh_modules/@ohos/bar")
+        oh_modules.join(".ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/bar").canonicalize().unwrap(),
+        oh_modules.join(".ohpm/@ohos+bar@1.0.0/oh_modules/@ohos/bar").canonicalize().unwrap()
     );
 
     // 3. Store contents (extracted, strip=1, manifest renamed).
@@ -550,8 +548,10 @@ async fn local_file_dependency() {
     let store = oh_modules.join(".ohpm").join(&store_dirs[0]).join("oh_modules/mylib");
     assert!(store.join("oh-package.json5").is_file());
 
-    let link = std::fs::read_link(oh_modules.join("mylib")).unwrap();
-    assert_eq!(link, PathBuf::from(format!(".ohpm/{}/oh_modules/mylib", store_dirs[0])));
+    assert_eq!(
+        oh_modules.join("mylib").canonicalize().unwrap(),
+        store.canonicalize().unwrap()
+    );
 
     // The lockfile records the file dependency with a relative path.
     let lock_text = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
@@ -854,13 +854,9 @@ async fn version_conflict_resolves_to_max() {
     assert!(!packages.contains_key("@ohos/bar@1.0.0"), "old version pruned: {:?}", packages.keys());
 
     // Symlinks: every bar edge resolves to the max version.
-    let bar_link = std::fs::read_link(
-        prefix.join("oh_modules/.ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/bar"),
-    )
-    .unwrap();
     assert_eq!(
-        bar_link,
-        PathBuf::from("../../../@ohos+bar@2.0.0/oh_modules/@ohos/bar"),
+        prefix.join("oh_modules/.ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/bar").canonicalize().unwrap(),
+        prefix.join("oh_modules/.ohpm/@ohos+bar@2.0.0/oh_modules/@ohos/bar").canonicalize().unwrap(),
         "foo's bar edge must resolve to 2.0.0"
     );
 

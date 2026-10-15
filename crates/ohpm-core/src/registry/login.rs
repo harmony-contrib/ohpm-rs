@@ -625,21 +625,23 @@ mod tests {
 
     #[test]
     fn login_context_resolves_overrides_then_config() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let key = directory.path().join("cfg-key");
         let mut cfg = Config::new();
         cfg.set(types::PUBLISH_ID, "cfg-pid");
-        cfg.set(types::KEY_PATH, "/tmp/cfg-key");
+        cfg.set(types::KEY_PATH, &key.to_string_lossy());
         cfg.set(types::KEY_PASSPHRASE, "cfg-secret");
 
         let ctx = LoginContext::resolve(&cfg, &LoginOverrides::default()).unwrap();
         assert_eq!(ctx.publish_id, "cfg-pid");
-        assert_eq!(ctx.key_path, Some(PathBuf::from("/tmp/cfg-key")));
+        assert_eq!(ctx.key_path, Some(key));
         assert!(ctx.key_content.is_none());
         assert_eq!(ctx.passphrase, "cfg-secret");
 
         // CLI overrides win.
         let overrides = LoginOverrides {
             publish_id: Some("cli-pid".into()),
-            key_path: Some("/tmp/cli-key".into()),
+            key_path: Some(directory.path().join("cli-key").to_string_lossy().into_owned()),
             passphrase: Some("cli-secret".into()),
             ..Default::default()
         };
@@ -677,9 +679,10 @@ mod tests {
 
     #[test]
     fn missing_passphrase_is_an_error_not_a_prompt() {
+        let directory = tempfile::TempDir::new().unwrap();
         let mut cfg = Config::new();
         cfg.set(types::PUBLISH_ID, "pid");
-        cfg.set(types::KEY_PATH, "/tmp/key");
+        cfg.set(types::KEY_PATH, &directory.path().join("key").to_string_lossy());
         // no passphrase anywhere
         let err = LoginContext::resolve(&cfg, &LoginOverrides::default()).unwrap_err();
         assert_eq!(err.code, "KeyPassphraseMissing");

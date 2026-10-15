@@ -15,14 +15,18 @@
 //! * sorting is applied when `meta.stableOrder` (default) or the
 //!   `lockfile_stable_order` config is set.
 
+use crate::paths::PackagePath;
+
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::constants::{LOCK_JSON, LATEST, MY_PACKAGE_JSON};
+use crate::constants::{LATEST, LOCK_JSON, MY_PACKAGE_JSON};
 use crate::error::{OhpmError, Result};
-use crate::install::spec::{is_local_dependency, is_protocol_spec, parse_dependency, parse_inner, OhpaType};
+use crate::install::spec::{
+    is_local_dependency, is_protocol_spec, parse_dependency, parse_inner, OhpaType,
+};
 
 /// `LockFile.defaultLockJson.ATTENTION`.
 pub const LOCKFILE_ATTENTION: &str =
@@ -49,9 +53,17 @@ pub struct LockPkg {
     /// "ohpm" | "local" (npm white-list deferred).
     #[serde(default)]
     pub registry_type: String,
-    #[serde(rename = "resolved_hsp", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "resolved_hsp",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub resolved_hsp: Option<String>,
-    #[serde(rename = "integrity_hsp", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "integrity_hsp",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub integrity_hsp: Option<String>,
     /// Metadata-derived entries may carry dev dependencies; node-derived
     /// entries never do, so this is only serialized when non-empty.
@@ -199,10 +211,18 @@ fn merge_untied_lock_json(
             let mut key_str = raw_key.clone();
             let mut value_str = raw_value.clone();
             if matches!(key.ohpa_type, OhpaType::File | OhpaType::SourceCode) {
-                key_str = format!("{}@{}", key.name, relative_spec(project_root, &key.fetch_spec));
+                key_str = format!(
+                    "{}@{}",
+                    key.name,
+                    relative_spec(project_root, &key.fetch_spec)
+                );
             }
             if matches!(value.ohpa_type, OhpaType::File | OhpaType::SourceCode) {
-                value_str = format!("{}@{}", key.name, relative_spec(project_root, &value.fetch_spec));
+                value_str = format!(
+                    "{}@{}",
+                    key.name,
+                    relative_spec(project_root, &value.fetch_spec)
+                );
             }
             match locker.lockfile.specifiers.get(&key_str) {
                 Some(existing) if existing != &value_str => {
@@ -296,8 +316,9 @@ pub fn relative_spec(root: &Path, spec: &str) -> String {
         spec = rest;
     }
     let p = Path::new(spec);
-    if p.is_absolute() {
-        slash(&relative_path(root, p))
+    if p.has_root() {
+        let resolved = crate::workspace::resolve_file_spec(root, spec);
+        relative_path(root, &resolved)
     } else {
         slash(spec)
     }
@@ -308,12 +329,16 @@ pub fn relative_spec(root: &Path, spec: &str) -> String {
 /// `pkgName` field exactly like the reference.
 pub fn parse_spec_key(spec: &str) -> Result<(String, String)> {
     let rest = if spec.starts_with('@') && spec.contains('/') {
-        let i = spec.find('/').ok_or_else(|| OhpmError::locker_invalid_spec(spec))?;
+        let i = spec
+            .find('/')
+            .ok_or_else(|| OhpmError::locker_invalid_spec(spec))?;
         &spec[i + 1..]
     } else {
         spec
     };
-    let at = rest.find('@').ok_or_else(|| OhpmError::locker_invalid_spec(spec))?;
+    let at = rest
+        .find('@')
+        .ok_or_else(|| OhpmError::locker_invalid_spec(spec))?;
     if at == 0 {
         return Err(OhpmError::locker_invalid_spec(spec));
     }
@@ -337,9 +362,7 @@ pub fn resolve_lock_spec(root: &Path, spec_value: &str) -> Result<String> {
 /// Resolve a local spec to a normalized absolute path
 /// (`path.resolve(root, spec)`).
 fn resolve_local(root: &Path, spec: &str) -> String {
-    crate::workspace::resolve_file_spec(root, &format!("file:{spec}"))
-        .to_string_lossy()
-        .into_owned()
+    PackagePath::serialize(&crate::workspace::resolve_file_spec(root, spec))
 }
 
 /// `path.relative` with forward slashes.
@@ -350,25 +373,11 @@ fn relative_path(from: &Path, to: &Path) -> String {
     // and produce a wrong `../..`-chain instead of the true relative path.
     let from = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
     let to = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
-    let from: Vec<_> = from.components().collect();
-    let to: Vec<_> = to.components().collect();
-    let mut common = 0;
-    while common < from.len() && common < to.len() && from[common] == to[common] {
-        common += 1;
-    }
-    let mut parts: Vec<String> = (0..from.len() - common).map(|_| "..".to_string()).collect();
-    for c in &to[common..] {
-        parts.push(c.as_os_str().to_string_lossy().into_owned());
-    }
-    if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
+    PackagePath::serialize(&PackagePath::relative(&from, &to))
 }
 
 fn slash(s: &str) -> String {
-    s.replace('\\', "/")
+    PackagePath::serialize(Path::new(s))
 }
 
 /// The per-module locker state (mirrors `PackageLocker` + the manager glue for
@@ -444,7 +453,13 @@ impl Locker {
     /// specifier KEY under the declared name but the VALUE under the real
     /// package name (`foo@ohpm:bar@^1.0.0` -> `bar@1.2.3`), so the flush
     /// prune matches the packages key.
-    pub fn update_lock_spec_named(&mut self, key_name: &str, value_name: &str, spec: &str, pinned: &str) {
+    pub fn update_lock_spec_named(
+        &mut self,
+        key_name: &str,
+        value_name: &str,
+        spec: &str,
+        pinned: &str,
+    ) {
         let key = format!("{key_name}@{spec}");
         self.visited_spec_keys.insert(key.clone());
         self.lockfile
@@ -566,13 +581,15 @@ mod tests {
             "@ohos/foo@^1.2.0".to_string(),
             "@ohos/foo@1.2.3".to_string(),
         );
-        lf.specifiers.insert("bar@latest".to_string(), "bar@2.0.0".to_string());
+        lf.specifiers
+            .insert("bar@latest".to_string(), "bar@2.0.0".to_string());
         let mut pkg = LockPkg::new("@ohos/foo", "1.2.3");
         pkg.integrity = Some("sha512-AAAA".to_string());
         pkg.resolved = "https://ohpm.openharmony.cn/ohpm/@ohos/foo/-/foo-1.2.3.tgz".to_string();
         pkg.shasum = Some("abc123".to_string());
         pkg.registry_type = "ohpm".to_string();
-        pkg.dependencies.insert("@ohos/bar".to_string(), "1.0.0".to_string());
+        pkg.dependencies
+            .insert("@ohos/bar".to_string(), "1.0.0".to_string());
         lf.packages.insert("@ohos/foo@1.2.3".to_string(), pkg);
         lf.packages.insert(
             "bar@2.0.0".to_string(),
@@ -668,8 +685,10 @@ mod tests {
         locker.update_lock_spec("bar", "latest", "2.1.0");
         let mut pkg = LockPkg::new("bar", "2.1.0");
         pkg.registry_type = "ohpm".to_string();
-        pkg.dependencies.insert("baz".to_string(), "1.0.0".to_string());
-        pkg.dynamic_dependencies.insert("dyn".to_string(), "1.0.0".to_string());
+        pkg.dependencies
+            .insert("baz".to_string(), "1.0.0".to_string());
+        pkg.dynamic_dependencies
+            .insert("dyn".to_string(), "1.0.0".to_string());
         locker.update_lock_pkg("bar", "2.1.0", pkg);
         locker.flush().unwrap();
 
@@ -700,23 +719,58 @@ mod tests {
 
     #[test]
     fn spec_key_and_relative() {
-        assert_eq!(parse_spec_key("@ohos/foo@1.2.3").unwrap(), ("foo".into(), "1.2.3".into()));
-        assert_eq!(parse_spec_key("foo@^1.0.0").unwrap(), ("foo".into(), "^1.0.0".into()));
+        assert_eq!(
+            parse_spec_key("@ohos/foo@1.2.3").unwrap(),
+            ("foo".into(), "1.2.3".into())
+        );
+        assert_eq!(
+            parse_spec_key("foo@^1.0.0").unwrap(),
+            ("foo".into(), "^1.0.0".into())
+        );
         assert!(parse_spec_key("nonsense").is_err());
 
-        assert_eq!(relative_spec(Path::new("/proj"), "latest"), "latest");
-        assert_eq!(relative_spec(Path::new("/proj"), "^1.0.0"), "^1.0.0");
-        assert_eq!(relative_spec(Path::new("/proj"), "/proj/../lib"), "../lib");
-        assert_eq!(relative_spec(Path::new("/proj/entry"), "/proj/lib"), "../lib");
-        assert_eq!(relative_spec(Path::new("/proj"), "file:../lib"), "../lib");
+        let directory = TempDir::new().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(project.join("entry")).unwrap();
+        std::fs::create_dir(directory.path().join("lib")).unwrap();
+        std::fs::create_dir(project.join("lib")).unwrap();
+        let root = project.as_path();
+        let target = root.join("../lib");
+        assert_eq!(relative_spec(root, "latest"), "latest");
+        assert_eq!(relative_spec(root, "^1.0.0"), "^1.0.0");
+        assert_eq!(
+            relative_spec(root, &PackagePath::serialize(&target)),
+            "../lib"
+        );
+        assert_eq!(
+            relative_spec(
+                &root.join("entry"),
+                &PackagePath::serialize(&root.join("lib"))
+            ),
+            "../lib"
+        );
+        assert_eq!(relative_spec(root, "file:../lib"), "../lib");
+        #[cfg(windows)]
+        {
+            let rooted: std::path::PathBuf = directory
+                .path()
+                .join("lib")
+                .components()
+                .skip(1)
+                .collect();
+            assert_eq!(
+                relative_spec(root, &PackagePath::serialize(&rooted)),
+                "../lib"
+            );
+        }
 
         assert_eq!(
-            resolve_lock_spec(Path::new("/proj"), "foo@1.2.3").unwrap(),
+            resolve_lock_spec(root, "foo@1.2.3").unwrap(),
             "foo@1.2.3"
         );
         assert_eq!(
-            resolve_lock_spec(Path::new("/proj"), "foo@../lib").unwrap(),
-            "foo@/lib"
+            resolve_lock_spec(root, "foo@../lib").unwrap(),
+            format!("foo@{}", PackagePath::serialize(&directory.path().join("lib")))
         );
     }
 
@@ -731,10 +785,16 @@ mod tests {
             parse_spec_key("foo@ohpm:bar@^1.0.0").unwrap(),
             ("foo".into(), "ohpm:bar@^1.0.0".into())
         );
-        assert_eq!(parse_spec_key("bar@1.2.3").unwrap(), ("bar".into(), "1.2.3".into()));
+        assert_eq!(
+            parse_spec_key("bar@1.2.3").unwrap(),
+            ("bar".into(), "1.2.3".into())
+        );
         assert_eq!(
             parse_spec_key("foo@0123456789abcdef0123456789abcdef01234567").unwrap(),
-            ("foo".into(), "0123456789abcdef0123456789abcdef01234567".into())
+            (
+                "foo".into(),
+                "0123456789abcdef0123456789abcdef01234567".into()
+            )
         );
         assert_eq!(
             parse_spec_key("foo@workspace:^1.0.0").unwrap(),
@@ -772,9 +832,10 @@ mod unified_tests {
         let lf1 = Lockfile {
             meta_stable_order: true,
             meta_enable_unified_lockfile: Some(false),
-            specifiers: BTreeMap::from([
-                ("@ohos/foo@^1.0.0".to_string(), "@ohos/foo@1.2.3".to_string()),
-            ]),
+            specifiers: BTreeMap::from([(
+                "@ohos/foo@^1.0.0".to_string(),
+                "@ohos/foo@1.2.3".to_string(),
+            )]),
             packages: BTreeMap::from([(
                 "@ohos/foo@1.2.3".to_string(),
                 LockPkg {
@@ -789,9 +850,7 @@ mod unified_tests {
         let lf2 = Lockfile {
             meta_stable_order: false,
             meta_enable_unified_lockfile: Some(false),
-            specifiers: BTreeMap::from([
-                ("entry@../entry".to_string(), "entry@<abs>".to_string()),
-            ]),
+            specifiers: BTreeMap::from([("entry@../entry".to_string(), "entry@<abs>".to_string())]),
             packages: BTreeMap::new(),
         };
         write_lockfile(&proj.join("lib1/oh-package-lock.json5"), &lf2).unwrap();
@@ -813,10 +872,7 @@ mod unified_tests {
         let lf = Lockfile {
             meta_stable_order: true,
             meta_enable_unified_lockfile: Some(true),
-            specifiers: BTreeMap::from([(
-                "foo@^1.0.0".to_string(),
-                "foo@1.0.0".to_string(),
-            )]),
+            specifiers: BTreeMap::from([("foo@^1.0.0".to_string(), "foo@1.0.0".to_string())]),
             packages: BTreeMap::new(),
         };
         write_lockfile(&proj.join(LOCK_JSON), &lf).unwrap();

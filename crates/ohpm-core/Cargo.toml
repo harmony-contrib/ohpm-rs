@@ -37,10 +37,16 @@ md-5.workspace = true
 aes.workspace = true
 des.workspace = true
 cbc.workspace = true
+pathdiff.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+junction.workspace = true
+dunce.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
 tower.workspace = true
 tempfile.workspace = true
 base64.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "time", "sync"] }
+tokio.workspace = true
+same-file.workspace = true

@@ -1,0 +1,26 @@
+name: Platform CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit, integration, and CLI tests
+        run: cargo test --workspace --all-targets --locked --no-fail-fast
+      - name: Build release CLI
+        run: cargo build --release --package ohpm-cli --locked

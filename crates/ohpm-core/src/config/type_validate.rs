@@ -249,7 +249,13 @@ mod tests {
         assert!(validate(types::USE_STREAM_THRESHOLD_SIZE, "5").is_none());
         assert!(validate(types::USE_STREAM_THRESHOLD_SIZE, "501").is_some());
         assert!(validate(types::KEY_PATH, "relative/path").is_some());
-        assert!(validate(types::KEY_PATH, "/abs/path").is_none());
+        let absolute = if cfg!(windows) { "C:/abs/path" } else { "/abs/path" };
+        assert!(validate(types::KEY_PATH, absolute).is_none());
+        #[cfg(windows)]
+        {
+            assert!(validate(types::KEY_PATH, r"\\server\share\key.pem").is_none());
+            assert!(validate(types::KEY_PATH, r"C:relative\key.pem").is_some());
+        }
         assert!(validate(types::HTTP_PROXY, "https://proxy:8080").is_none());
         assert!(validate(types::HTTP_PROXY, "security:abc").is_none());
         // CJK rejected for bool keys

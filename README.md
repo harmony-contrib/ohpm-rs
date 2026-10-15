@@ -93,8 +93,22 @@ installation (`config/`, `core/registry/`, `core/publish/`, `core/package/`).
 
 ```sh
 cargo build --workspace        # binary: target/debug/ohpm-rs
-cargo test  --workspace        # 201 tests: unit + mock-registry integration
+cargo test  --workspace        # unit, mock-registry, and real-CLI tests
 ```
+
+### Host platforms
+
+The source build supports Linux, Windows, and macOS. Package directory links use
+relative symlinks on Unix and NTFS junctions on Windows; junctions do not require
+administrator privileges or Developer Mode. File links in archives and Git
+dependencies are restored after their targets, with a hard-link fallback on
+Windows when symbolic-link privileges are unavailable.
+
+GitHub Actions runs the complete workspace test suite and a release CLI build on
+Ubuntu, Windows, and macOS. CLI integration tests execute real installs, reinstalls,
+workspace retargeting, cleanup, local HAR installs, packing, prepublish checks, and
+unified version changes under paths containing spaces and Unicode. Registry tests
+use local mock servers and need no publishing credentials.
 
 ## Environment-variable authentication (CI)
 
@@ -254,12 +268,26 @@ Rules:
 
 | Command                                            | Workspace mode                                                                                                                                                        |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `install`                                          | `--workspace` installs every member, including `publish: false`; `--filter <pkgs>` selects members by exact name; combine with `--all` to install their build-profile modules |
 | `publish` / `prepublish`                           | `file:` deps rewritten to member versions before upload; accepts a member directory (auto-pack); `--workspace`/`--filter` publish every (selected) publishable member |
 | `pack`                                             | `--workspace` packs every publishable member; `--filter <pkgs>` selects; `publish: false` skipped                                                                     |
 | `list`                                             | `-r/--recursive` lists every member's graph; at the workspace root all members are listed by default                                                                  |
 | `version`                                          | `--workspace` unified, `--filter`, `--preid`, `version.mode` from the yaml, `publish: false` skipped                                                                  |
 | `unpublish`, `info`                                | operate by package name — work from anywhere                                                                                                                          |
 | `init`, `config`, `login`, `ping`, `root`, `cache` | global / cwd-scoped — not workspace-scoped                                                                                                                            |
+
+`ohpm-rs install --workspace` works from the workspace root or any member; the
+root does not need an `oh-package.json5`. `--prefix <dir>` locates the workspace
+from another directory. Membership and exclusions come from `ohpm-workspace.yaml`.
+An unknown filter or missing workspace fails before installing any member, and a
+member installation failure makes the command fail. Named package arguments and
+`--target_path` cannot be combined with `--workspace`/`--filter`.
+
+```sh
+ohpm-rs install --workspace
+ohpm-rs install --filter @demo/app,@demo/lib
+ohpm-rs install --workspace --all --prefix ./my-workspace
+```
 
 ### Versioning
 

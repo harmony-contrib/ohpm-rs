@@ -169,7 +169,7 @@ fn load_config(home: &Path, registry_url: &str, cache: &Path) -> Config {
     std::env::set_var("OHPM_REGISTRY", registry_url);
     std::env::set_var("OHPM_CACHE", cache);
     std::env::set_var("OHPM_LOG_LEVEL", "error");
-    let mut cfg = Config::new();
+    let mut cfg = Config::with_user_rc(home.join(".ohpm/.ohpmrc"));
     cfg.load(Path::new("."), None).unwrap();
     cfg
 }
@@ -211,13 +211,18 @@ impl GitFixture {
         Self::run(&repo, &["init", "-q"]);
         GitFixture {
             _dir: dir,
-            url: format!("file://{}", repo.display()),
+            url: url::Url::from_directory_path(&repo).unwrap().to_string(),
             repo,
         }
     }
 
     fn run(repo: &Path, args: &[&str]) {
-        let status = Command::new("git").args(args).current_dir(repo).status().unwrap();
+        let status = Command::new("git")
+            .env("GIT_AUTHOR_NAME", "ohpm test")
+            .env("GIT_AUTHOR_EMAIL", "ohpm@example.invalid")
+            .env("GIT_COMMITTER_NAME", "ohpm test")
+            .env("GIT_COMMITTER_EMAIL", "ohpm@example.invalid")
+            .args(args).current_dir(repo).status().unwrap();
         assert!(status.success(), "git {args:?} failed");
     }
 
@@ -288,8 +293,10 @@ async fn git_dependency_installs_and_reinstalls_offline() {
     assert!(!store.join(&store_dirs[0]).join(".git").exists());
 
     // Top-level link.
-    let link = std::fs::read_link(prefix.join("oh_modules/gitfoo")).unwrap();
-    assert_eq!(link, PathBuf::from(format!(".ohpm/{}/oh_modules/gitfoo", store_dirs[0])));
+    assert_eq!(
+        prefix.join("oh_modules/gitfoo").canonicalize().unwrap(),
+        pkg.canonicalize().unwrap()
+    );
 
     // Delete the fixture repo: re-install still works (lockfile pins the
     // commit; the store is already materialized).
@@ -368,8 +375,10 @@ async fn alias_dependency() {
     assert!(lock_text.contains("\"bar@1.0.0\": {"), "{lock_text}");
 
     // Symlink named after the alias, pointing at the real package store dir.
-    let link = std::fs::read_link(prefix.join("oh_modules/foo")).unwrap();
-    assert_eq!(link, PathBuf::from(".ohpm/bar@1.0.0/oh_modules/bar"));
+    assert_eq!(
+        prefix.join("oh_modules/foo").canonicalize().unwrap(),
+        prefix.join("oh_modules/.ohpm/bar@1.0.0/oh_modules/bar").canonicalize().unwrap()
+    );
     assert!(prefix.join("oh_modules/.ohpm/bar@1.0.0/oh_modules/bar/oh-package.json5").is_file());
 
     // Re-install is lockfile-first: no new packument fetch.
@@ -425,11 +434,13 @@ async fn workspace_protocol() {
     let outcome = run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
     assert_eq!(outcome.installed, 0, "workspace members are links, not installs");
 
-    // Links point at the member dirs (two levels up from oh_modules/).
-    let link = std::fs::read_link(prefix.join("oh_modules/bar")).unwrap();
-    assert_eq!(link, PathBuf::from("../../packages/bar"));
-    let link = std::fs::read_link(prefix.join("oh_modules/baz")).unwrap();
-    assert_eq!(link, PathBuf::from("../../packages/baz"));
+    // Both Unix symlinks and Windows junctions resolve to the workspace members.
+    for name in ["bar", "baz"] {
+        assert_eq!(
+            prefix.join("oh_modules").join(name).canonicalize().unwrap(),
+            ws_root.join("packages").join(name).canonicalize().unwrap()
+        );
+    }
 
     // Workspace members lock as their relative member path (pnpm parity:
     // the member appears in the packages map keyed by its path), so an

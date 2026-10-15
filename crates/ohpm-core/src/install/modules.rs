@@ -178,26 +178,27 @@ mod tests {
     #[test]
     fn load_build_profile() {
         let dir = TempDir::new().unwrap();
+        let library = TempDir::new().unwrap();
         write(
             dir.path(),
             "build-profile.json5",
-            r#"{
-  "app": { "products": [] },
-  "modules": [
-    { "name": "entry", "srcPath": "./entry", "targets": [] },
-    { "name": "lib", "srcPath": "/abs/lib" },
-    { "srcPath": "./noname" },
-    {}
-  ]
-}"#,
+            &serde_json::json!({
+                "app": { "products": [] },
+                "modules": [
+                    { "name": "entry", "srcPath": "./entry", "targets": [] },
+                    { "name": "lib", "srcPath": library.path() },
+                    { "srcPath": "./noname" },
+                    {}
+                ]
+            }).to_string(),
         );
         let pbp = ProjectBuildProfile::load(dir.path()).expect("load");
         assert_eq!(pbp.module_roots.len(), 3);
         assert_eq!(pbp.module_roots[0], dir.path().join("entry"));
-        assert_eq!(pbp.module_roots[1], PathBuf::from("/abs/lib"));
+        assert_eq!(pbp.module_roots[1], library.path());
         assert_eq!(pbp.module_roots[2], dir.path().join("noname"));
         assert_eq!(pbp.get_module_path("entry"), Some(&dir.path().join("entry")));
-        assert_eq!(pbp.get_module_path("lib"), Some(&PathBuf::from("/abs/lib")));
+        assert_eq!(pbp.get_module_path("lib"), Some(&library.path().to_path_buf()));
         assert_eq!(pbp.get_module_name(&dir.path().join("entry")), "entry");
         assert_eq!(pbp.get_module_name(&dir.path().join("other")), "");
     }

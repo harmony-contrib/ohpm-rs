@@ -3,7 +3,11 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "ohpm-rs", version, about = "ohpm-rs (OpenHarmony package manager), a Rust reimplementation of ohpm")]
+#[command(
+    name = "ohpm-rs",
+    version,
+    about = "ohpm-rs (OpenHarmony package manager), a Rust reimplementation of ohpm"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
@@ -293,8 +297,18 @@ pub struct InstallArgs {
     /// Install the dependencies of all modules in the project.
     #[arg(long)]
     pub all: bool,
+    /// Install every workspace member, including publish: false packages.
+    #[arg(long, conflicts_with_all = ["pkg", "target_path"])]
+    pub workspace: bool,
+    /// Only install the listed workspace members (exact names, comma-separated).
+    #[arg(
+        long,
+        value_delimiter = ',',
+        conflicts_with_all = ["pkg", "target_path"]
+    )]
+    pub filter: Vec<String>,
     /// Package root directory (defaults to the nearest directory upward that
-    /// contains oh-package.json5).
+    /// contains oh-package.json5). In workspace mode, locate the workspace here.
     #[arg(long)]
     pub prefix: Option<String>,
     /// The parameter file path (parameterization).

@@ -209,7 +209,7 @@ fn load_config(home: &Path, registry_url: &str, cache: &Path) -> Config {
     std::env::set_var("OHPM_REGISTRY", registry_url);
     std::env::set_var("OHPM_CACHE", cache);
     std::env::set_var("OHPM_LOG_LEVEL", "error");
-    let mut cfg = Config::new();
+    let mut cfg = Config::with_user_rc(home.join(".ohpm/.ohpmrc"));
     cfg.load(Path::new("."), None).unwrap();
     cfg
 }
@@ -423,16 +423,11 @@ async fn hardlink_mode_shares_inodes_across_projects() {
         .unwrap();
 
     // Both projects' store files are hard links into the same inode.
-    use std::os::unix::fs::MetadataExt;
     let rel = "oh_modules/.ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/foo/oh-package.json5";
     let f1 = prefix1.join(rel);
     let f2 = prefix2.join(rel);
     assert!(f1.is_file() && f2.is_file(), "{f1:?} {f2:?}");
-    assert_eq!(
-        std::fs::metadata(&f1).unwrap().ino(),
-        std::fs::metadata(&f2).unwrap().ino(),
-        "hard-link mode must share inodes"
-    );
+    assert!(same_file::is_same_file(&f1, &f2).unwrap(), "hard-link mode must share file identities");
 
     // The shared extracted layer materialized once.
     let extracted = cache.path().join("extracted-v1");
@@ -470,11 +465,7 @@ async fn default_mode_installs_independent_copies() {
 
     // Default (off): each project extracts its own copy — distinct inodes,
     // and no shared extracted layer.
-    use std::os::unix::fs::MetadataExt;
     let rel = "oh_modules/.ohpm/@ohos+foo@1.2.3/oh_modules/@ohos/foo/oh-package.json5";
-    assert_ne!(
-        std::fs::metadata(prefix1.join(&rel)).unwrap().ino(),
-        std::fs::metadata(prefix2.join(&rel)).unwrap().ino()
-    );
+    assert!(!same_file::is_same_file(prefix1.join(rel), prefix2.join(rel)).unwrap());
     assert!(!cache.path().join("extracted-v1").exists());
 }

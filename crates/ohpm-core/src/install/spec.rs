@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 
 use crate::constants::{LATEST, TAG_PREFIX};
 use crate::error::{OhpmError, Result};
+use crate::paths::PackagePath;
 use crate::workspace::resolve_file_spec;
 
 /// The ohpa dependency types (see `OhpaType.js`).
@@ -117,7 +118,8 @@ pub fn is_git_pinned(spec: &str) -> bool {
 /// `Ohpa.isLocalDependency` — the parse-time variant used to decide whether a
 /// spec is a local (file/source-code) dependency.
 pub fn is_local_spec(spec: &str) -> bool {
-    REGEX_LOCAL().is_match(spec)
+    Path::new(spec).has_root()
+        || REGEX_LOCAL().is_match(spec)
         || spec.contains('/')
         || REGEX_IS_FILE().is_match(spec)
         || REGEX_IS_DIR().is_match(spec)
@@ -149,7 +151,8 @@ pub fn is_local_dependency(spec: &str) -> bool {
     spec != LATEST
         && !is_valid_range(spec)
         && (!is_valid_url(spec)
-            || (!spec.is_empty() && (REGEX_LOCAL_PATH_START().is_match(spec) || spec.starts_with("file:"))))
+            || (!spec.is_empty()
+                && (REGEX_LOCAL_PATH_START().is_match(spec) || spec.starts_with("file:"))))
 }
 
 /// `util/isValidUrl.js` — `new URL(s)` succeeds.
@@ -198,7 +201,7 @@ pub fn version_judged_with_tag_and_local(
         };
         let mut s = abs.to_string_lossy().into_owned();
         if slash_local {
-            s = s.replace('\\', "/");
+            s = PackagePath::serialize(&abs);
         }
         return s;
     }
@@ -287,7 +290,10 @@ fn resolve(name: String, raw_spec: String, where_dir: &Path, raw: &str) -> Resul
     // Protocol specs are detected before the local/registry split (in
     // particular `ohpm:...` would otherwise be grabbed by the inner-pkg
     // branch of `from_file`).
-    if spec.raw_spec.starts_with(crate::constants::WORKSPACE_PREFIX) {
+    if spec
+        .raw_spec
+        .starts_with(crate::constants::WORKSPACE_PREFIX)
+    {
         from_workspace(&mut spec);
     } else if spec.raw_spec.starts_with(crate::constants::ALIAS_PREFIX) {
         from_alias(&mut spec)?;
@@ -372,10 +378,11 @@ fn save_spec(where_dir: &Path, stripped: &str, resolved: &Path) -> String {
     if REGEX_PATH_LINUX().is_match(stripped) {
         let idx = stripped.find('~').unwrap_or(0);
         format!("file:{}", &stripped[idx..])
-    } else if Path::new(stripped).is_absolute() {
-        format!("file:{}", pathdiff_relative(where_dir, resolved))
     } else {
-        format!("file:{}", pathdiff_relative(where_dir, resolved))
+        format!(
+            "file:{}",
+            PackagePath::serialize(&PackagePath::relative(where_dir, resolved))
+        )
     }
 }
 
@@ -449,7 +456,10 @@ pub fn validate_name(name: &str) -> Result<()> {
             return Err(OhpmError::ohpa_name_special());
         }
     }
-    if matches!(name.to_ascii_lowercase().as_str(), "oh_modules" | "node_modules") {
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "oh_modules" | "node_modules"
+    ) {
         return Err(OhpmError::ohpa_name_blacklist(name));
     }
     Ok(())
@@ -461,7 +471,10 @@ pub fn encode_uri_component(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
         let keep = b.is_ascii_alphanumeric()
-            || matches!(b, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')');
+            || matches!(
+                b,
+                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+            );
         if keep {
             out.push(*b as char);
         } else {
@@ -480,31 +493,6 @@ fn split_scoped(name: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((&scope[1..], rest))
-}
-
-/// `path.relative(from, to)` with both sides already absolute/normalized:
-/// the `..`-relative path from `from` to `to`, forward slashes, "." when equal.
-fn pathdiff_relative(from: &Path, to: &Path) -> String {
-    let from_parts: Vec<_> = from.components().collect();
-    let to_parts: Vec<_> = to.components().collect();
-    let mut common = 0;
-    while common < from_parts.len()
-        && common < to_parts.len()
-        && from_parts[common] == to_parts[common]
-    {
-        common += 1;
-    }
-    let mut parts: Vec<String> = (0..from_parts.len() - common)
-        .map(|_| "..".to_string())
-        .collect();
-    for c in &to_parts[common..] {
-        parts.push(c.as_os_str().to_string_lossy().into_owned());
-    }
-    if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    }
 }
 
 // ---- regexes (mirror `Ohpa.js` / `Regex.js` / `ValidatePkg.js`) -------------
@@ -578,18 +566,18 @@ mod tests {
         let s = parse("../lib", "/proj/entry");
         assert_eq!(s.name, "");
         assert_eq!(s.ohpa_type, OhpaType::SourceCode);
-        assert_eq!(s.fetch_spec, "/proj/lib");
+        assert_eq!(Path::new(&s.fetch_spec), Path::new("/proj/lib"));
         assert_eq!(s.save_spec, "file:../lib");
         assert!(s.is_local());
 
         let s = parse("./lib", "/proj/entry");
-        assert_eq!(s.fetch_spec, "/proj/entry/lib");
+        assert_eq!(Path::new(&s.fetch_spec), Path::new("/proj/entry/lib"));
         assert_eq!(s.save_spec, "file:lib"); // relative from where dir
         assert_eq!(s.ohpa_type, OhpaType::SourceCode);
 
         let s = parse("file:../lib", "/proj/entry");
         assert_eq!(s.ohpa_type, OhpaType::SourceCode);
-        assert_eq!(s.fetch_spec, "/proj/lib");
+        assert_eq!(Path::new(&s.fetch_spec), Path::new("/proj/lib"));
         assert_eq!(s.save_spec, "file:../lib");
 
         let s = parse("~/dev/lib", "/proj/entry");
@@ -600,7 +588,7 @@ mod tests {
 
         let s = parse("pkg.har", "/proj/entry");
         assert_eq!(s.ohpa_type, OhpaType::File);
-        assert_eq!(s.fetch_spec, "/proj/entry/pkg.har");
+        assert_eq!(Path::new(&s.fetch_spec), Path::new("/proj/entry/pkg.har"));
 
         let s = parse("pkg.tgz", "/proj/entry");
         assert_eq!(s.ohpa_type, OhpaType::File);
@@ -610,8 +598,23 @@ mod tests {
         // Absolute path input.
         let s = parse("/abs/pkg.har", "/proj/entry");
         assert_eq!(s.ohpa_type, OhpaType::File);
-        assert_eq!(s.fetch_spec, "/abs/pkg.har");
+        assert_eq!(Path::new(&s.fetch_spec), Path::new("/abs/pkg.har"));
         assert_eq!(s.save_spec, "file:../../abs/pkg.har");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_and_unc_specs_are_local_and_keep_valid_save_paths() {
+        let cross_drive = parse(r"D:\lib space\pkg.har", r"C:\work\app");
+        assert_eq!(cross_drive.ohpa_type, OhpaType::File);
+        assert_eq!(cross_drive.save_spec, "file:D:/lib space/pkg.har");
+        assert_eq!(
+            Path::new(&cross_drive.fetch_spec),
+            Path::new(r"D:\lib space\pkg.har")
+        );
+        let unc = parse(r"\\server\share\library", r"C:\work\app");
+        assert_eq!(unc.ohpa_type, OhpaType::SourceCode);
+        assert_eq!(unc.save_spec, "file://server/share/library");
     }
 
     #[test]
@@ -649,7 +652,6 @@ mod tests {
         // trailing junk after whitespace — a documented leniency).
         let err = parse_inner("foo@1.2.3&x", Path::new("/proj")).unwrap_err();
         assert_eq!(err.code, "OhpaSpecUri");
-
     }
 
     #[test]
@@ -809,13 +811,17 @@ mod protocol_tests {
         assert!(!is_protocol_spec("../lib"));
 
         assert!(is_git_pinned("0123456789abcdef0123456789abcdef01234567"));
-        assert!(is_git_pinned("0123456789abcdef0123456789abcdef01234567&path:sub"));
+        assert!(is_git_pinned(
+            "0123456789abcdef0123456789abcdef01234567&path:sub"
+        ));
         assert!(!is_git_pinned("1.2.3"));
 
         // Protocol specs are never "local" for store-dir naming.
         assert!(!is_local_dependency("workspace:^1.0.0"));
         assert!(!is_local_dependency("git+https://x/y"));
-        assert!(!is_local_dependency("0123456789abcdef0123456789abcdef01234567"));
+        assert!(!is_local_dependency(
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
         assert!(!is_local_dependency("ohpm:bar@^1.0.0"));
     }
 }
