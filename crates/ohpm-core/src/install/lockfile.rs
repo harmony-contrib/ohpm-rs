@@ -729,18 +729,40 @@ mod tests {
         );
         assert!(parse_spec_key("nonsense").is_err());
 
-        let root = if cfg!(windows) { Path::new("C:/proj") } else { Path::new("/proj") };
+        let directory = TempDir::new().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir_all(project.join("entry")).unwrap();
+        std::fs::create_dir(directory.path().join("lib")).unwrap();
+        std::fs::create_dir(project.join("lib")).unwrap();
+        let root = project.as_path();
         let target = root.join("../lib");
         assert_eq!(relative_spec(root, "latest"), "latest");
         assert_eq!(relative_spec(root, "^1.0.0"), "^1.0.0");
-        assert_eq!(relative_spec(root, &PackagePath::serialize(&target)), "../lib");
         assert_eq!(
-            relative_spec(&root.join("entry"), &PackagePath::serialize(&root.join("lib"))),
+            relative_spec(root, &PackagePath::serialize(&target)),
+            "../lib"
+        );
+        assert_eq!(
+            relative_spec(
+                &root.join("entry"),
+                &PackagePath::serialize(&root.join("lib"))
+            ),
             "../lib"
         );
         assert_eq!(relative_spec(root, "file:../lib"), "../lib");
         #[cfg(windows)]
-        assert_eq!(relative_spec(root, "/lib"), "../lib");
+        {
+            let rooted: std::path::PathBuf = directory
+                .path()
+                .join("lib")
+                .components()
+                .skip(1)
+                .collect();
+            assert_eq!(
+                relative_spec(root, &PackagePath::serialize(&rooted)),
+                "../lib"
+            );
+        }
 
         assert_eq!(
             resolve_lock_spec(root, "foo@1.2.3").unwrap(),
@@ -748,7 +770,7 @@ mod tests {
         );
         assert_eq!(
             resolve_lock_spec(root, "foo@../lib").unwrap(),
-            if cfg!(windows) { "foo@C:/lib" } else { "foo@/lib" }
+            format!("foo@{}", PackagePath::serialize(&directory.path().join("lib")))
         );
     }
 
