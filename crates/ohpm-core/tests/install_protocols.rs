@@ -475,6 +475,79 @@ async fn workspace_protocol() {
     assert_eq!(err.code, "WorkspaceNoMatchingVersion");
 }
 
+/// `--lockfile-only` resolves the workspace and writes byte-identical
+/// `oh-package-lock.json5` content, but creates no `oh_modules`, rewrites no
+/// manifest, and picks up workspace member version changes.
+#[tokio::test]
+async fn lockfile_only_matches_full_install_for_workspace() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+
+    // A workspace with members bar@1.0.0 and baz@2.0.0-beta.1.
+    let ws_root = work.path().join("ws");
+    std::fs::create_dir_all(&ws_root).unwrap();
+    std::fs::write(ws_root.join("ohpm-workspace.yaml"), "packages:\n  - \"packages/*\"\n").unwrap();
+    for (name, version) in [("bar", "1.0.0"), ("baz", "2.0.0-beta.1")] {
+        let dir = ws_root.join("packages").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oh-package.json5"),
+            format!("{{ name: \"{name}\", version: \"{version}\" }}\n"),
+        )
+        .unwrap();
+    }
+
+    let prefix = ws_root.join("entry");
+    write_manifest(&prefix, "{ \"bar\": \"workspace:^1.0.0\", \"baz\": \"workspace:*\" }", "{}");
+    let manifest_before = std::fs::read_to_string(prefix.join("oh-package.json5")).unwrap();
+    let cfg = load_config(home.path(), "http://127.0.0.1:1/ohpm/", cache.path());
+
+    // Baseline: a normal install symlinks the members and writes the lockfile.
+    let outcome = run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    assert_eq!(outcome.installed, 0, "workspace members are links, not installs");
+    assert!(prefix.join("oh_modules/bar").exists());
+    let expected_lock = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
+
+    // Reset the normal install's outputs, then run lockfile-only.
+    std::fs::remove_dir_all(prefix.join("oh_modules")).unwrap();
+    std::fs::remove_file(prefix.join("oh-package-lock.json5")).unwrap();
+    let opts = InstallOptions {
+        lockfile_only: true,
+        ..Default::default()
+    };
+    let outcome = run_install(&cfg, &prefix, &[], &opts).await.unwrap();
+    assert_eq!(outcome.installed, 0);
+    assert_eq!(outcome.module_roots, vec![prefix.clone()]);
+
+    // (a) Byte-identical lockfile; (b) no oh_modules tree.
+    let lock_text = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
+    assert_eq!(lock_text, expected_lock, "lockfile-only must match a full install");
+    assert!(!prefix.join("oh_modules").exists(), "lockfile-only must not create oh_modules");
+    assert_eq!(
+        std::fs::read_to_string(prefix.join("oh-package.json5")).unwrap(),
+        manifest_before,
+        "lockfile-only must not rewrite oh-package.json5"
+    );
+
+    // (c) A workspace member version bump is re-resolved into the lockfile.
+    std::fs::write(
+        ws_root.join("packages/bar/oh-package.json5"),
+        "{ name: \"bar\", version: \"1.1.0\" }\n",
+    )
+    .unwrap();
+    run_install(&cfg, &prefix, &[], &opts).await.unwrap();
+    let lock: serde_json::Value =
+        json5::from_str(&std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap())
+            .unwrap();
+    assert_eq!(lock["specifiers"]["bar@workspace:^1.0.0"], "bar@../packages/bar");
+    assert_eq!(lock["packages"]["bar@../packages/bar"]["version"], "1.1.0");
+    assert!(!prefix.join("oh_modules").exists());
+}
+
 #[tokio::test]
 async fn publish_workspace_replacement() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

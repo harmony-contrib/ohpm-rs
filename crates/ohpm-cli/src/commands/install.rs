@@ -50,6 +50,7 @@ impl<'a> InstallRunner<'a> {
             save_dynamic: args.save_dynamic,
             link: !args.no_link,
             all: args.all,
+            lockfile_only: args.lockfile_only,
             parameter_file: args.parameter_file.as_deref().map(PathBuf::from),
             target_path: args.target_path.as_deref().map(PathBuf::from),
             registry: args.registry.clone(),

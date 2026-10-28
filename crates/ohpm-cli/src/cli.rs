@@ -297,6 +297,11 @@ pub struct InstallArgs {
     /// Install the dependencies of all modules in the project.
     #[arg(long)]
     pub all: bool,
+    /// Resolve dependencies and write oh-package-lock.json5 only; do not
+    /// download packages, create oh_modules, or run hooks. Packages named on
+    /// the command line are still saved to oh-package.json5.
+    #[arg(long = "lockfile-only")]
+    pub lockfile_only: bool,
     /// Install every workspace member, including publish: false packages.
     #[arg(long, conflicts_with_all = ["pkg", "target_path"])]
     pub workspace: bool,

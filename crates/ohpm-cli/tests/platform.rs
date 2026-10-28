@@ -239,6 +239,32 @@ fn workspace_install_all_includes_build_profile_modules() {
 }
 
 #[test]
+fn install_lockfile_only_writes_lockfile_without_oh_modules() {
+    let fixture = WorkspaceFixture::new();
+    let manifest_before = fs::read(fixture.app.join("oh-package.json5")).unwrap();
+
+    fixture.succeed(&fixture.app, &["install", "--lockfile-only"]);
+
+    let lock_path = fixture.app.join("oh-package-lock.json5");
+    assert!(lock_path.exists(), "--lockfile-only must write the lockfile");
+    assert!(
+        !fixture.app.join("oh_modules").exists(),
+        "--lockfile-only must not create oh_modules"
+    );
+    assert_eq!(
+        fs::read(fixture.app.join("oh-package.json5")).unwrap(),
+        manifest_before,
+        "--lockfile-only must not rewrite oh-package.json5"
+    );
+
+    // Re-running is stable and still creates no oh_modules tree.
+    let first_lock = fs::read(&lock_path).unwrap();
+    fixture.succeed(&fixture.app, &["install", "--lockfile-only"]);
+    assert_eq!(fs::read(&lock_path).unwrap(), first_lock);
+    assert!(!fixture.app.join("oh_modules").exists());
+}
+
+#[test]
 fn workspace_install_reports_a_member_failure() {
     let fixture = WorkspaceFixture::new();
     fixture.member(

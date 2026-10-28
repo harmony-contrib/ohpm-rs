@@ -465,6 +465,128 @@ async fn cli_input_saves_resolved_version() {
     assert!(cap.packument_gets.iter().any(|n| n == "unittest"));
 }
 
+/// `--lockfile-only` resolves metadata, writes the lockfile, and (like pnpm's
+/// `add --lockfile-only`) saves CLI package arguments to the manifest, but
+/// downloads no tarball and creates no `oh_modules`.
+#[tokio::test]
+async fn lockfile_only_saves_cli_package_without_downloading() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let (registry, _tarballs) = sample_registry(work.path());
+    let (addr, _registry, capture) = spawn_mock(registry).await;
+
+    let prefix = work.path().join("entry");
+    write_manifest(&prefix, "{}", "{}");
+    let cfg = load_config(home.path(), &addr, cache.path());
+
+    let opts = InstallOptions {
+        lockfile_only: true,
+        ..Default::default()
+    };
+    let outcome = run_install(&cfg, &prefix, &["@ohos/foo".to_string()], &opts)
+        .await
+        .unwrap();
+    assert_eq!(outcome.installed, 0);
+    assert_eq!(outcome.cli_input_names, vec!["@ohos/foo"]);
+
+    // The lockfile is complete (foo + its bar dependency)...
+    let lock: Value = json5::from_str(
+        &std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(lock["specifiers"]["@ohos/foo@^1.2.3"], "@ohos/foo@1.2.3");
+    assert_eq!(lock["specifiers"]["@ohos/bar@^1.0.0"], "@ohos/bar@1.0.0");
+    assert!(lock["packages"]["@ohos/foo@1.2.3"]["integrity"].is_string());
+    assert!(lock["packages"]["@ohos/bar@1.0.0"]["integrity"].is_string());
+
+    // ...but no store/symlink tree is materialized.
+    assert!(!prefix.join("oh_modules").exists(), "no oh_modules for --lockfile-only");
+
+    // Packages named on the command line are still saved (pnpm's
+    // `add --lockfile-only` writes the manifest); `--no-save` leaves it alone.
+    let manifest_text = std::fs::read_to_string(prefix.join("oh-package.json5")).unwrap();
+    assert!(
+        manifest_text.contains("\"@ohos/foo\": \"^1.2.3\""),
+        "{manifest_text}"
+    );
+
+    let prefix2 = work.path().join("entry2");
+    write_manifest(&prefix2, "{}", "{}");
+    let before = std::fs::read_to_string(prefix2.join("oh-package.json5")).unwrap();
+    let opts = InstallOptions {
+        save: false,
+        lockfile_only: true,
+        ..Default::default()
+    };
+    run_install(&cfg, &prefix2, &["unittest".to_string()], &opts)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(prefix2.join("oh-package.json5")).unwrap(),
+        before,
+        "--no-save --lockfile-only must not touch the manifest"
+    );
+    let lock_text = std::fs::read_to_string(prefix2.join("oh-package-lock.json5")).unwrap();
+    assert!(
+        lock_text.contains("\"unittest@latest\": \"unittest@1.0.0\""),
+        "{lock_text}"
+    );
+    assert!(!prefix2.join("oh_modules").exists());
+
+    // Resolution fetches packuments only; tarballs are never requested.
+    let cap = capture.lock().unwrap();
+    assert!(cap.tarball_gets.is_empty(), "{:?}", cap.tarball_gets);
+    assert!(cap.packument_gets.iter().any(|n| n == "@ohos/foo"));
+    assert!(cap.packument_gets.iter().any(|n| n == "@ohos/bar"));
+}
+
+/// `--lockfile-only` must not run preInstall/postInstall hooks.
+#[cfg(unix)]
+#[tokio::test]
+async fn lockfile_only_skips_lifecycle_hooks() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let (registry, _tarballs) = sample_registry(work.path());
+    let (addr, _registry, _capture) = spawn_mock(registry).await;
+
+    // No dependency at all: a normal install only runs the hooks.
+    let prefix = work.path().join("entry");
+    std::fs::create_dir_all(&prefix).unwrap();
+    std::fs::write(
+        prefix.join("oh-package.json5"),
+        "{\n  name: \"entry\", version: \"1.0.0\", main: \"index.ets\",\n  hooks: { preInstall: \"touch pre-install-ran\", postInstall: \"touch post-install-ran\" },\n}\n",
+    )
+    .unwrap();
+    let cfg = load_config(home.path(), &addr, cache.path());
+
+    run_install(&cfg, &prefix, &[], &InstallOptions::default()).await.unwrap();
+    assert!(prefix.join("pre-install-ran").exists());
+    assert!(prefix.join("post-install-ran").exists());
+
+    // Reset and repeat lockfile-only: neither hook may run.
+    std::fs::remove_file(prefix.join("pre-install-ran")).unwrap();
+    std::fs::remove_file(prefix.join("post-install-ran")).unwrap();
+    let _ = std::fs::remove_dir_all(prefix.join("oh_modules"));
+    let _ = std::fs::remove_file(prefix.join("oh-package-lock.json5"));
+    let opts = InstallOptions {
+        lockfile_only: true,
+        ..Default::default()
+    };
+    let outcome = run_install(&cfg, &prefix, &[], &opts).await.unwrap();
+    assert_eq!(outcome.installed, 0);
+    assert!(!prefix.join("pre-install-ran").exists(), "preInstall must be skipped");
+    assert!(!prefix.join("post-install-ran").exists(), "postInstall must be skipped");
+    assert!(!prefix.join("oh_modules").exists());
+}
+
 #[tokio::test]
 async fn integrity_mismatch_fails() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

@@ -52,6 +52,12 @@ pub struct InstallOptions {
     pub experimental_concurrently_safe: bool,
     /// `--all` — install all project modules' dependencies.
     pub all: bool,
+    /// `--lockfile-only` (install only) — resolve dependencies and write
+    /// `oh-package-lock.json5` without touching the store, `oh_modules`, or
+    /// the lifecycle hooks. Packages named on the command line are still
+    /// saved to `oh-package.json5`, matching pnpm's `add --lockfile-only`.
+    /// `update` and `uninstall` never set it.
+    pub lockfile_only: bool,
     /// `--all-modules` (update) — act on every module root.
     pub all_modules: bool,
     /// `--tag-filter` (update) — only update tag dependencies whose tag
@@ -81,6 +87,7 @@ impl Default for InstallOptions {
             link: true,
             experimental_concurrently_safe: true,
             all: false,
+            lockfile_only: false,
             all_modules: false,
             tag_filter: None,
             prefix: None,
@@ -262,6 +269,23 @@ fn valid_range(key: &str, value: u64, min: u64, max: u64) -> Option<String> {
     }
 }
 
+/// Record packages named on the command line in `oh-package.json5`, using the
+/// resolved specs. Shared by the normal install path and `--lockfile-only`
+/// (pnpm's `add --lockfile-only` also writes the manifest).
+fn save_cli_input_packages(
+    graph: &graph::DependencyGraph,
+    cli_input_names: &[String],
+    prefix: &Path,
+    opts: &InstallOptions,
+) -> Result<()> {
+    if let Some(updated) =
+        root::update_command_line_input_dependencies(graph, cli_input_names, prefix)?
+    {
+        root::update_pkg_json(prefix, &updated, opts, Some(cli_input_names))?;
+    }
+    Ok(())
+}
+
 /// The shared pipeline (`installModules` + the per-command wrapper steps).
 async fn run_pipeline(
     client: &RegistryClient,
@@ -311,14 +335,17 @@ async fn run_pipeline(
         lockfile::lock_file_name("")
     };
 
-    // 1b. lifecycle hooks — preInstall / preUninstall.
+    // 1b. lifecycle hooks — preInstall / preUninstall. `--lockfile-only`
+    // performs no install/update/uninstall work, so the hooks are skipped.
     let root_refs: Vec<&std::path::Path> = module_roots.iter().map(|p| p.as_path()).collect();
-    match command {
-        InstallCommand::Install | InstallCommand::Update => {
-            hooks::run_hooks(&root_refs, hooks::HookEvent::PreInstall)?;
-        }
-        InstallCommand::Uninstall => {
-            hooks::run_hooks(&root_refs, hooks::HookEvent::PreUninstall)?;
+    if !opts.lockfile_only {
+        match command {
+            InstallCommand::Install | InstallCommand::Update => {
+                hooks::run_hooks(&root_refs, hooks::HookEvent::PreInstall)?;
+            }
+            InstallCommand::Uninstall => {
+                hooks::run_hooks(&root_refs, hooks::HookEvent::PreUninstall)?;
+            }
         }
     }
 
@@ -482,6 +509,24 @@ async fn run_pipeline(
     name_alarm.print()?;
     case_alarm.print();
 
+    // 3d. `--lockfile-only`: resolve, save explicitly requested packages, and
+    // flush the lockers, then return before the store (4), symlink (5),
+    // install-record (6), post-hook (7b), lockfile flush (8) and empty-dir
+    // cleanup (9) phases. Like pnpm's `add --lockfile-only`, packages named on
+    // the command line are still recorded in `oh-package.json5`; nothing else
+    // in the manifest is rewritten.
+    if opts.lockfile_only {
+        if command == InstallCommand::Install {
+            save_cli_input_packages(&graphs[0], &cli_input_names, prefix, opts)?;
+        }
+        resolver.flush_lockers().await?;
+        return Ok(PipelineOutcome {
+            module_roots,
+            installed: 0,
+            cli_input_names,
+        });
+    }
+
     // 4. install phase (download/extract into the store).
     let store = Arc::new(store::StoreContext::new(
         client.clone(),
@@ -568,13 +613,7 @@ async fn run_pipeline(
     }
     match command {
         InstallCommand::Install => {
-            if let Some(updated) = root::update_command_line_input_dependencies(
-                &graphs[0],
-                &cli_input_names,
-                prefix,
-            )? {
-                root::update_pkg_json(prefix, &updated, opts, Some(&cli_input_names))?;
-            }
+            save_cli_input_packages(&graphs[0], &cli_input_names, prefix, opts)?;
         }
         InstallCommand::Update => {
             let targets: Vec<PathBuf> = if opts.all_modules {
