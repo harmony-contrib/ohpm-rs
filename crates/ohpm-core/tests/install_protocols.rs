@@ -305,6 +305,64 @@ async fn git_dependency_installs_and_reinstalls_offline() {
 }
 
 #[tokio::test]
+async fn git_lock_restores_missing_store_at_pinned_commit_and_subdirectory() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    init_test_logger();
+    let _env = EnvGuard::new();
+    let home = tempfile::TempDir::new().unwrap();
+    let work = tempfile::TempDir::new().unwrap();
+    let cache = tempfile::TempDir::new().unwrap();
+    let cfg = load_config(home.path(), "http://127.0.0.1:1/ohpm/", cache.path());
+
+    for (case, subdir) in [("root", ""), ("nested", "packages/gitfoo/")] {
+        let fx = GitFixture::new();
+        fx.write(
+            &format!("{subdir}oh-package.json5"),
+            "{ name: \"gitfoo\", version: \"1.0.0\", main: \"index.ets\" }\n",
+        );
+        fx.write(&format!("{subdir}index.ets"), "export const value = 1;\n");
+        if !subdir.is_empty() {
+            fx.write("outside.ets", "must not enter the package\n");
+        }
+        fx.commit("original");
+        let fragment = if subdir.is_empty() {
+            "HEAD".to_string()
+        } else {
+            format!("HEAD&path:{}", subdir.trim_end_matches('/'))
+        };
+        let prefix = work.path().join(case);
+        write_manifest(
+            &prefix,
+            &format!("{{ \"gitfoo\": \"{}#{fragment}\" }}", fx.url),
+            "{}",
+        );
+        run_install(&cfg, &prefix, &[], &InstallOptions::default())
+            .await
+            .unwrap();
+        let lock_before = std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap();
+
+        // A fresh clone has the lockfile but no store. Advancing HEAD must not
+        // change which commit, or which subdirectory, gets restored.
+        fx.write(&format!("{subdir}index.ets"), "export const value = 2;\n");
+        fx.commit("advance HEAD");
+        std::fs::remove_dir_all(prefix.join("oh_modules")).unwrap();
+        run_install(&cfg, &prefix, &[], &InstallOptions::default())
+            .await
+            .unwrap();
+        let installed = prefix.join("oh_modules/gitfoo");
+        assert_eq!(
+            std::fs::read_to_string(installed.join("index.ets")).unwrap(),
+            "export const value = 1;\n"
+        );
+        assert!(!installed.join("outside.ets").exists());
+        assert_eq!(
+            std::fs::read_to_string(prefix.join("oh-package-lock.json5")).unwrap(),
+            lock_before
+        );
+    }
+}
+
+#[tokio::test]
 async fn git_dependency_semver_fragment_and_errors() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     init_test_logger();
