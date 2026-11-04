@@ -267,6 +267,9 @@ pub struct CleanArgs {
     /// Only clean the listed workspace members (by name, comma-separated).
     #[arg(long, value_delimiter = ',')]
     pub filter: Vec<String>,
+    /// Project/package root, or the directory used to locate the workspace.
+    #[arg(long)]
+    pub prefix: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -393,16 +396,22 @@ pub struct UpdateArgs {
 #[derive(Args, Debug, Clone)]
 pub struct UninstallArgs {
     /// Package names to uninstall (without versions).
-    #[arg(value_name = "pkg")]
+    #[arg(value_name = "pkg", required = true)]
     pub pkg: Vec<String>,
     /// Do not save to oh-package.json5.
     #[arg(long = "no-save")]
     pub no_save: bool,
     /// Uninstall a package in the current module and install the dependencies
     /// of all modules in the project.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["workspace", "filter"])]
     pub all: bool,
-    /// Package root directory.
+    /// Uninstall from every workspace member, including private packages.
+    #[arg(long)]
+    pub workspace: bool,
+    /// Only uninstall from these workspace members (exact names, comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub filter: Vec<String>,
+    /// Package root, or the directory used to locate the workspace.
     #[arg(long)]
     pub prefix: Option<String>,
     /// Specify the registry.

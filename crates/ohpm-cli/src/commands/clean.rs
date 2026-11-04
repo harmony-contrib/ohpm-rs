@@ -1,28 +1,35 @@
-//! `ohpm clean [--kl|--keep-lockfile] [--workspace|--filter]` — delete the
-//! `oh_modules` directories and the lockfiles of the project (mirrors
-//! `lib/commands/clean.js`); `--workspace`/`--filter` extend it to the
-//! workspace members (like the publish/version batch modes).
+//! Clean a project/package or a selected set of workspace members.
 
 use anyhow::{anyhow, Result};
+use ohpm_core::clean::Cleaner;
+use ohpm_core::workspace::{Workspace, WORKSPACE_CONFIG};
 
 use super::{load_config, output};
 
 pub async fn run(args: &crate::cli::CleanArgs) -> Result<()> {
     let _config = load_config()?;
-    let start = std::time::Instant::now();
-    if args.workspace || !args.filter.is_empty() {
-        let cwd = std::env::current_dir()?;
-        let ws = ohpm_core::workspace::Workspace::find(&cwd)?.ok_or_else(|| {
+    let cwd = std::env::current_dir()?;
+    let anchor = args
+        .prefix
+        .as_ref()
+        .map(|prefix| cwd.join(prefix))
+        .unwrap_or(cwd);
+    if !anchor.is_dir() {
+        anyhow::bail!("The clean prefix is not a directory: {}", anchor.display());
+    }
+    let cleaner = if args.workspace || !args.filter.is_empty() {
+        let workspace = Workspace::find(&anchor)?.ok_or_else(|| {
             anyhow!(
-                "No {} found walking up from the current directory; --workspace/--filter require a \
-                 workspace.",
-                ohpm_core::workspace::WORKSPACE_CONFIG
+                "No {WORKSPACE_CONFIG} found walking up from {}; --workspace/--filter require a workspace.",
+                anchor.display()
             )
         })?;
-        ohpm_core::clean::clean_workspace(&ws, &args.filter, args.keep_lockfile)?;
+        Cleaner::for_workspace(&workspace, &args.filter, args.keep_lockfile)?
     } else {
-        ohpm_core::clean::start_clean(args.keep_lockfile)?;
-    }
+        Cleaner::for_directory(&anchor, args.keep_lockfile)?
+    };
+    let start = std::time::Instant::now();
+    cleaner.run()?;
     let elapsed = start.elapsed().as_millis();
     output::succeed(&format!(
         "clean completed in {}s {}ms",
