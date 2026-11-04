@@ -48,6 +48,7 @@ pub enum Command {
     /// Install packages from the registry or local sources.
     Install(InstallArgs),
     /// Update package(s) to their latest version based on the specified range.
+    #[command(alias = "up")]
     Update(UpdateArgs),
     /// Uninstall package(s).
     Uninstall(UninstallArgs),
@@ -351,6 +352,13 @@ pub struct UpdateArgs {
     /// Package names to update (without versions).
     #[arg(value_name = "pkg")]
     pub pkg: Vec<String>,
+    /// Update every workspace member, including publish: false packages.
+    #[arg(long, conflicts_with_all = ["all", "all_modules"])]
+    pub workspace: bool,
+    /// Only update the listed workspace members (exact names, comma-separated).
+    /// Implies workspace mode.
+    #[arg(long, value_delimiter = ',', conflicts_with_all = ["all", "all_modules"])]
+    pub filter: Vec<String>,
     /// Update a package or all dependencies in the current module and install
     /// the dependencies of all modules in the project.
     #[arg(long)]
@@ -361,7 +369,7 @@ pub struct UpdateArgs {
     /// Update the dependencies whose tag matches the regular expression.
     #[arg(long = "tag-filter")]
     pub tag_filter: Option<String>,
-    /// Package root directory.
+    /// Package root directory. In workspace mode, locate the workspace here.
     #[arg(long)]
     pub prefix: Option<String>,
     /// Specify the registry.
