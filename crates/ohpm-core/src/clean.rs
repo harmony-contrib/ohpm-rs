@@ -1,102 +1,122 @@
-//! `ohpm clean`, mirroring `lib/commands/clean.js` + `lib/core/clean/index.js`:
-//! delete the `oh_modules` directories and the `oh-package*.lock.json5` files
-//! of the project root and every build-profile module (`--keep-lockfile`
-//! preserves the lockfiles).
+//! Clean installed modules and lockfiles in a project, package, or workspace.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::constants::{MY_MODULES, MY_PACKAGE_JSON};
 use crate::error::{OhpmError, Result};
+use crate::filesystem::DirectoryLink;
 use crate::install::modules::ProjectBuildProfile;
+use crate::paths::PackagePath;
+use crate::workspace::Workspace;
 
-/// `startClean` — clean the project root and its modules.
-pub fn start_clean(keep_lockfile: bool) -> Result<()> {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    // `config.getProjectRoot()` — the build-profile based project root.
-    let project_root = crate::config::find_project_root(&cwd);
-    let project_root = match project_root {
-        Some(p)
-            if p.join(crate::constants::MY_PACKAGE_JSON).is_file() =>
-        {
-            p
-        }
-        _ => {
-            return Err(OhpmError::new(
-                "NotFoundProjectRootError",
-                format!(
-                    "NotFound build-profile.json5 or oh-package.json5 file in current path: {}",
-                    cwd.display()
-                ),
-            ));
-        }
-    };
-    let module_roots = ProjectBuildProfile::load(&project_root)
-        .map(|p| p.get_module_roots().to_vec())
-        .unwrap_or_default();
-    if module_roots.is_empty() {
-        clean_module(&project_root, keep_lockfile)?;
-        return Ok(());
-    }
-    // `[...moduleRoots, projectRoot]` — all cleaned (in parallel in the
-    // reference; sequential here is equivalent).
-    for module_root in module_roots.iter().chain(std::iter::once(&project_root)) {
-        clean_module(module_root, keep_lockfile)?;
-    }
-    Ok(())
+/// Own the validated cleanup scope and apply it without expanding member selection.
+pub struct Cleaner {
+    roots: Vec<PathBuf>,
+    keep_lockfile: bool,
 }
 
-/// `cleanModule` — remove the `oh_modules` dir and the lockfiles (unless
-/// `keepLockfile`) of one module.
-fn clean_module(module_root: &Path, keep_lockfile: bool) -> Result<()> {
-    log::debug!("begin to clean module: {}", module_root.display());
-    let result = (|| -> std::io::Result<()> {
-        for entry in std::fs::read_dir(module_root)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // `/oh_modules|oh-package.*-lock.json5/`
-            let is_oh_modules = name == crate::constants::MY_MODULES;
-            let is_lockfile =
-                name.starts_with("oh-package") && name.ends_with("-lock.json5");
-            if !(is_oh_modules || is_lockfile) {
-                continue;
+impl Cleaner {
+    /// Preserve project-wide build-profile cleanup, with a standalone package fallback.
+    pub fn for_directory(directory: &Path, keep_lockfile: bool) -> Result<Self> {
+        let directory = PackagePath::canonicalize(directory)?;
+        let project = directory.ancestors().find_map(ProjectBuildProfile::load);
+        let roots = if let Some(project) = project {
+            if !project.project_root.join(MY_PACKAGE_JSON).is_file() {
+                return Err(Self::missing_project(&directory));
             }
-            if keep_lockfile && is_lockfile {
-                continue;
-            }
-            let path = entry.path();
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path)?;
-            } else {
-                std::fs::remove_file(&path)?;
+            let mut roots = project.module_roots;
+            roots.push(project.project_root);
+            roots
+        } else {
+            let prefix = crate::config::find_local_prefix(&directory)
+                .filter(|prefix| prefix.join(MY_PACKAGE_JSON).is_file())
+                .ok_or_else(|| Self::missing_project(&directory))?;
+            vec![prefix]
+        };
+        Self::new(roots, keep_lockfile)
+    }
+
+    /// Filters are exact package names; validate all names before cleaning any member.
+    pub fn for_workspace(
+        workspace: &Workspace,
+        filter: &[String],
+        keep_lockfile: bool,
+    ) -> Result<Self> {
+        let roots = workspace
+            .filtered_members(filter)?
+            .into_iter()
+            .map(|member| member.dir.clone())
+            .collect();
+        Self::new(roots, keep_lockfile)
+    }
+
+    fn new(roots: Vec<PathBuf>, keep_lockfile: bool) -> Result<Self> {
+        let mut roots = roots
+            .into_iter()
+            .map(|root| {
+                let path = PackagePath::canonicalize(&root)
+                    .map_err(|error| Self::module_error(&root, error))?;
+                if !path.is_dir() {
+                    return Err(Self::module_error(
+                        &root,
+                        std::io::Error::new(std::io::ErrorKind::NotADirectory, "not a directory"),
+                    ));
+                }
+                Ok(path)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        roots.sort();
+        roots.dedup();
+        Ok(Self {
+            roots,
+            keep_lockfile,
+        })
+    }
+
+    pub fn run(self) -> Result<()> {
+        // Enumerate every selected directory before removing anything, including invalid
+        // build-profile module paths. Native paths retain spaces, Unicode and link identity.
+        let mut entries = Vec::new();
+        for root in &self.roots {
+            for entry in std::fs::read_dir(root).map_err(|error| Self::module_error(root, error))? {
+                let entry = entry.map_err(|error| Self::module_error(root, error))?;
+                let name = entry.file_name();
+                let is_lockfile = name.to_str().is_some_and(|name| {
+                    name.starts_with("oh-package") && name.ends_with("-lock.json5")
+                });
+                if name == MY_MODULES || (is_lockfile && !self.keep_lockfile) {
+                    entries.push(entry.path());
+                }
             }
         }
+        entries.sort();
+        entries.dedup();
+        for path in entries {
+            log::debug!("clean: {}", path.display());
+            DirectoryLink::remove_entry(&path).map_err(|error| Self::module_error(&path, error))?;
+        }
         Ok(())
-    })();
-    result.map_err(|e| {
+    }
+
+    fn missing_project(directory: &Path) -> OhpmError {
+        OhpmError::new(
+            "NotFoundProjectRootError",
+            format!(
+                "No project or package containing {MY_PACKAGE_JSON} found from {}",
+                directory.display()
+            ),
+        )
+    }
+
+    fn module_error(path: &Path, error: std::io::Error) -> OhpmError {
         OhpmError::new(
             "CleanModuleFailed",
             format!(
-                "Clean module {} failed,  files may be occupied, detail: {e}",
-                module_root.display()
+                "Clean {} failed, files may be occupied, detail: {error}",
+                path.display()
             ),
         )
-    })?;
-    log::debug!("clean module: {} succeed.", module_root.display());
-    Ok(())
-}
-
-/// `--workspace`/`--filter` mode (an ohpm-rs extension, like the publish and
-/// version batch modes): clean the `oh_modules` dirs and lockfiles of the
-/// selected workspace members.
-pub fn clean_workspace(
-    ws: &crate::workspace::Workspace,
-    filter: &[String],
-    keep_lockfile: bool,
-) -> Result<()> {
-    for member in ws.filtered_members(filter)? {
-        log::debug!("begin to clean workspace member: {}", member.dir.display());
-        clean_module(&member.dir, keep_lockfile)?;
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -112,7 +132,10 @@ mod tests {
         std::fs::write(dir.path().join("oh-package.json5"), "{}").unwrap();
         std::fs::write(dir.path().join("src.ets"), "").unwrap();
 
-        clean_module(dir.path(), false).unwrap();
+        Cleaner::for_directory(dir.path(), false)
+            .unwrap()
+            .run()
+            .unwrap();
         assert!(!dir.path().join("oh_modules").exists());
         assert!(!dir.path().join("oh-package-lock.json5").exists());
         assert!(!dir.path().join("oh-package-debug-lock.json5").exists());
@@ -126,7 +149,11 @@ mod tests {
         let root = dir.path().join("ws");
         std::fs::create_dir_all(root.join("packages/a")).unwrap();
         std::fs::create_dir_all(root.join("packages/b")).unwrap();
-        std::fs::write(root.join("ohpm-workspace.yaml"), "packages:\n  - \"packages/*\"\n").unwrap();
+        std::fs::write(
+            root.join("ohpm-workspace.yaml"),
+            "packages:\n  - \"packages/*\"\n",
+        )
+        .unwrap();
         std::fs::write(root.join("oh-package.json5"), "{ name: \"wsroot\" }\n").unwrap();
         for m in ["a", "b"] {
             std::fs::write(
@@ -135,21 +162,32 @@ mod tests {
             )
             .unwrap();
             std::fs::create_dir_all(root.join(format!("packages/{m}/oh_modules"))).unwrap();
-            std::fs::write(root.join(format!("packages/{m}/oh-package-lock.json5")), "{}").unwrap();
+            std::fs::write(
+                root.join(format!("packages/{m}/oh-package-lock.json5")),
+                "{}",
+            )
+            .unwrap();
         }
+        std::fs::create_dir_all(root.join("oh_modules")).unwrap();
         let ws = crate::workspace::Workspace::find(&root).unwrap().unwrap();
         // All members.
-        clean_workspace(&ws, &[], false).unwrap();
+        Cleaner::for_workspace(&ws, &[], false)
+            .unwrap()
+            .run()
+            .unwrap();
         assert!(!root.join("packages/a/oh_modules").exists());
         assert!(!root.join("packages/b/oh_modules").exists());
         assert!(!root.join("packages/a/oh-package-lock.json5").exists());
         // The workspace root itself is not a member.
-        assert!(!root.join("oh_modules").exists() || true);
+        assert!(root.join("oh_modules").is_dir());
         // Filter + keep-lockfile.
         std::fs::create_dir_all(root.join("packages/a/oh_modules")).unwrap();
         std::fs::write(root.join("packages/a/oh-package-lock.json5"), "{}").unwrap();
         std::fs::write(root.join("packages/b/oh-package-lock.json5"), "{}").unwrap();
-        clean_workspace(&ws, &["a".to_string()], true).unwrap();
+        Cleaner::for_workspace(&ws, &["a".to_string()], true)
+            .unwrap()
+            .run()
+            .unwrap();
         assert!(!root.join("packages/a/oh_modules").exists());
         assert!(root.join("packages/a/oh-package-lock.json5").is_file());
         assert!(root.join("packages/b/oh-package-lock.json5").is_file());
@@ -160,8 +198,37 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("oh_modules")).unwrap();
         std::fs::write(dir.path().join("oh-package-lock.json5"), "{}").unwrap();
-        clean_module(dir.path(), true).unwrap();
+        std::fs::write(dir.path().join("oh-package.json5"), "{}").unwrap();
+        Cleaner::for_directory(dir.path(), true)
+            .unwrap()
+            .run()
+            .unwrap();
         assert!(!dir.path().join("oh_modules").exists());
         assert!(dir.path().join("oh-package-lock.json5").is_file());
+    }
+
+    #[test]
+    fn clean_removes_directory_links_without_deleting_their_contents() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let package = temp.path().join("package");
+        let shared = temp.path().join("shared modules");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(package.join(MY_PACKAGE_JSON), "{}").unwrap();
+        std::fs::write(shared.join("payload"), "shared dependency").unwrap();
+        DirectoryLink::new(&shared, &package.join(MY_MODULES))
+            .ensure()
+            .unwrap();
+
+        Cleaner::for_directory(&package, false)
+            .unwrap()
+            .run()
+            .unwrap();
+
+        assert!(std::fs::symlink_metadata(package.join(MY_MODULES)).is_err());
+        assert_eq!(
+            std::fs::read(shared.join("payload")).unwrap(),
+            b"shared dependency"
+        );
     }
 }

@@ -52,6 +52,8 @@ pub struct InstallOptions {
     pub experimental_concurrently_safe: bool,
     /// `--all` — install all project modules' dependencies.
     pub all: bool,
+    /// Limit workspace operations to the selected package.
+    pub module_scope: modules::ModuleScope,
     /// `--lockfile-only` (install only) — resolve dependencies and write
     /// `oh-package-lock.json5` without touching the store, `oh_modules`, or
     /// the lifecycle hooks. Packages named on the command line are still
@@ -87,6 +89,7 @@ impl Default for InstallOptions {
             link: true,
             experimental_concurrently_safe: true,
             all: false,
+            module_scope: modules::ModuleScope::Project,
             lockfile_only: false,
             all_modules: false,
             tag_filter: None,
@@ -141,9 +144,7 @@ pub async fn install(
 ) -> Result<InstallOutcome> {
     // `checkInvalidCmdWhileParameterization` — installing named packages is
     // forbidden while the project is parameterized.
-    let project_root = crate::config::find_project_root(prefix)
-        .map(|p| p.clone())
-        .unwrap_or_else(|| prefix.to_path_buf());
+    let project_root = opts.module_scope.project_root(prefix);
     let parameterized = parameter::Parameterization::setup(config, &project_root, opts.parameter_file.as_deref())?
         .is_some();
     if parameterized && !args.is_empty() {
@@ -168,6 +169,7 @@ pub async fn update(
     args: &[String],
     opts: &InstallOptions,
 ) -> Result<UpdateOutcome> {
+    valid_cli_options("update", opts)?;
     // `PackageUtil.parse` — update arguments must not carry versions.
     for raw in args {
         if let Some(version) = root::parse_cli_pkg_version(raw) {
@@ -216,6 +218,10 @@ pub async fn uninstall(
 /// retry_times / retry_interval ranges).
 pub fn valid_cli_options(command: &str, opts: &InstallOptions) -> Result<()> {
     let invalid = |result: String| OhpmError::option_invalid(command, &result);
+    if let Some(filter) = &opts.tag_filter {
+        regex::Regex::new(filter)
+            .map_err(|error| invalid(format!(" - invalid tag-filter regex: {error}")))?;
+    }
     if let Some(registry) = &opts.registry {
         let mut entries: Vec<&str> = registry.split(',').collect();
         if entries.iter().any(|e| e.trim().is_empty()) {
@@ -312,9 +318,9 @@ async fn run_pipeline(
     // 1. module roots + project root (build-profile based). The `install_all`
     // config defaults to true (`getModuleRootDirs` reads it too). Target mode
     // (`--target_path`) switches the module roots to the dependencyMap's.
-    let install_all = opts.all || config.get_bool(types::INSTALL_ALL);
-    let project = crate::config::find_project_root(prefix)
-        .and_then(|p| modules::ProjectBuildProfile::load(&p));
+    let install_all = opts.module_scope == modules::ModuleScope::Project
+        && (opts.all || opts.all_modules || config.get_bool(types::INSTALL_ALL));
+    let project = opts.module_scope.project(prefix);
     let project_root = project
         .as_ref()
         .map(|p| p.project_root.clone())

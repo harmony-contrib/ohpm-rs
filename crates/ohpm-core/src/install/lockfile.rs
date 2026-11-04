@@ -499,7 +499,6 @@ impl Locker {
     pub fn clear_specifiers(&mut self) {
         self.lockfile.specifiers.clear();
         self.lockfile.meta_stable_order = true;
-        self.lockfile.meta_enable_unified_lockfile = Some(true);
     }
 
     /// `flush` — prune unvisited specifiers/packages, sort, and write (only
@@ -808,13 +807,16 @@ mod tests {
     }
 
     #[test]
-    fn clears_specifiers_sets_unified() {
-        let mut locker = Locker::load(Path::new("/proj"));
-        locker.update_lock_spec("foo", "^1.0.0", "1.2.3");
-        locker.clear_specifiers();
-        assert!(locker.lockfile.specifiers.is_empty());
-        assert!(locker.lockfile.meta_stable_order);
-        assert_eq!(locker.lockfile.meta_enable_unified_lockfile, Some(true));
+    fn clears_specifiers_preserves_lockfile_mode() {
+        for unified in [false, true] {
+            let mut locker = Locker::load(Path::new("/proj"));
+            locker.lockfile.meta_enable_unified_lockfile = Some(unified);
+            locker.update_lock_spec("foo", "^1.0.0", "1.2.3");
+            locker.clear_specifiers();
+            assert!(locker.lockfile.specifiers.is_empty());
+            assert!(locker.lockfile.meta_stable_order);
+            assert_eq!(locker.lockfile.meta_enable_unified_lockfile, Some(unified));
+        }
     }
 }
 

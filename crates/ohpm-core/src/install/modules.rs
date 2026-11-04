@@ -12,6 +12,32 @@ use crate::constants::BUILD_PROFILE;
 /// fires at most once per process.
 static OHMURL_WARNED: AtomicBool = AtomicBool::new(false);
 
+/// Whether an operation may discover other modules through a build profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModuleScope {
+    #[default]
+    Project,
+    /// Operate on exactly the selected package, even with `install_all` enabled.
+    Package,
+}
+
+impl ModuleScope {
+    pub fn project_root(self, prefix: &Path) -> PathBuf {
+        match self {
+            Self::Project => crate::config::find_project_root(prefix)
+                .unwrap_or_else(|| prefix.to_path_buf()),
+            Self::Package => prefix.to_path_buf(),
+        }
+    }
+
+    pub fn project(self, prefix: &Path) -> Option<ProjectBuildProfile> {
+        match self {
+            Self::Project => ProjectBuildProfile::load(&self.project_root(prefix)),
+            Self::Package => None,
+        }
+    }
+}
+
 /// The parsed `build-profile.json5` project (mirrors `projectBuildProfile`).
 #[derive(Debug, Clone, Default)]
 pub struct ProjectBuildProfile {
