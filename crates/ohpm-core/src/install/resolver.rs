@@ -844,7 +844,9 @@ impl Resolver {
                     let tmp = self.project_root.join(MY_MODULES).join(".tmp").join(format!("git-{}", uuid::Uuid::new_v4().simple()));
                     std::fs::create_dir_all(tmp.parent().unwrap())?;
                     let repo = crate::install::git::fetch_repo(&url, &tmp)?;
-                    crate::install::git::materialize_commit_in(&repo, &commit, sub, &pkg_store)?;
+                    // The store key includes the subdirectory; the Git object id does not.
+                    let commit_id = commit.split_once("&path:").map_or(commit.as_str(), |(id, _)| id);
+                    crate::install::git::materialize_commit_in(&repo, commit_id, sub, &pkg_store)?;
                     let _ = std::fs::remove_dir_all(&tmp);
                 }
                 let manifest = read_manifest_from_dir(&pkg_store)?;
