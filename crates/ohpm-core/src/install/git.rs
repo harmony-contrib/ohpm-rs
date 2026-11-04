@@ -5,7 +5,7 @@
 //! once and resolve the ref locally with `rev_parse_single` (which supports
 //! tags, branches, `HEAD` and short SHA prefixes). The same clone's commit
 //! tree is then walked to materialize the pinned content. A full 40-hex
-//! commit spec needs no network at all.
+//! commit pin can reuse an already materialized store without fetching.
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -19,7 +19,7 @@ use crate::install::semver::semver_max_satisfying;
 pub enum GitQuery {
     /// No fragment — `HEAD`.
     Head,
-    /// A full 40-hex commit SHA (no network needed).
+    /// A full 40-hex commit SHA (immutable).
     Commit(String),
     /// A 7–39 hex SHA prefix (resolved to the unique matching commit).
     Partial(String),
@@ -29,6 +29,16 @@ pub enum GitQuery {
     Semver(String),
     /// `#path:<subdir>` (optionally combined with another fragment via `&`).
     Path { sub: String, inner: Box<GitQuery> },
+}
+
+impl GitQuery {
+    pub(crate) fn pinned_key(&self) -> Option<String> {
+        match self {
+            Self::Commit(sha) => Some(sha.to_ascii_lowercase()),
+            Self::Path { sub, inner } => inner.pinned_key().map(|sha| format!("{sha}&path:{sub}")),
+            _ => None,
+        }
+    }
 }
 
 /// Parse a git spec (`<url>#<fragment>`), mirroring pnpm's fragment grammar.
@@ -89,94 +99,117 @@ pub fn fetch_repo(url: &str, tmp: &Path) -> Result<gix::Repository> {
     Ok(repo)
 }
 
-/// Resolve a query to a commit hex inside a cloned repository, following
-/// pnpm's ref priority (full SHA → prefix → ref → refs/<ref> →
-/// refs/tags/<ref>^{} → refs/tags/<ref> → refs/heads/<ref>; `HEAD`; semver
-/// over tags).
-pub fn resolve_commit_in(repo: &gix::Repository, query: &GitQuery) -> Result<String> {
-    match query {
-        GitQuery::Commit(sha) => Ok(sha.clone()),
-        GitQuery::Partial(prefix) => rev_parse(repo, prefix),
-        GitQuery::Head => rev_parse(repo, "HEAD"),
-        GitQuery::Ref(r) => {
-            let candidates = [
-                r.as_str(),
-                &format!("refs/{r}"),
-                &format!("refs/tags/{r}^{{}}"),
-                &format!("refs/tags/{r}"),
-                &format!("refs/heads/{r}"),
-            ];
-            for cand in candidates {
-                if let Ok(sha) = rev_parse(repo, cand) {
-                    return Ok(sha);
-                }
-            }
-            Err(OhpmError::git_ref_not_found(&repo_path(repo), r))
-        }
-        GitQuery::Semver(range) => {
-            let tags = tag_names(repo)?;
-            let matching = semver_max_satisfying(&tags, range);
-            match matching {
-                Some(normalized) => {
-                    // The matcher normalizes versions (drops a "v" prefix) —
-                    // find the original tag name again.
-                    let tag = tags
-                        .iter()
-                        .find(|t| {
-                            node_semver::Version::parse(t)
-                                .map(|v| v.to_string())
-                                .ok()
-                                .as_deref()
-                                == Some(normalized.as_str())
-                        })
-                        .cloned()
-                        .unwrap_or(normalized);
-                    rev_parse(repo, &format!("refs/tags/{tag}^{{}}"))
-                }
-                None => Err(OhpmError::git_semver_no_match(&repo_path(repo), range)),
-            }
-        }
-        GitQuery::Path { inner, .. } => resolve_commit_in(repo, inner),
-    }
+/// Resolve fetched refs to commit objects, including annotated tags and
+/// branches stored under the clone's remote-tracking namespace.
+pub(crate) struct GitCommitResolver<'a> {
+    repo: &'a gix::Repository,
 }
 
-/// `rev_parse_single` with error mapping (ambiguous prefixes → GitAmbiguousRef).
-fn rev_parse(repo: &gix::Repository, spec: &str) -> Result<String> {
-    let id = repo.rev_parse_single(spec).map_err(|e| {
-        let msg = e.to_string();
-        if msg.to_lowercase().contains("ambiguous") {
-            OhpmError::git_ambiguous_ref(&repo_path(repo), spec, 2)
-        } else {
-            OhpmError::git_ref_not_found(&repo_path(repo), spec)
+impl<'a> GitCommitResolver<'a> {
+    pub(crate) fn new(repo: &'a gix::Repository) -> Self {
+        Self { repo }
+    }
+
+    pub(crate) fn resolve(&self, query: &GitQuery) -> Result<String> {
+        match query {
+            GitQuery::Commit(sha) => Ok(sha.to_ascii_lowercase()),
+            GitQuery::Partial(prefix) => self.rev_parse(prefix),
+            GitQuery::Head => self.rev_parse("HEAD"),
+            GitQuery::Ref(reference) => {
+                let mut candidates = vec![
+                    reference.clone(),
+                    format!("refs/{reference}"),
+                    format!("refs/tags/{reference}"),
+                    format!("refs/heads/{reference}"),
+                ];
+                let branch = reference
+                    .strip_prefix("refs/heads/")
+                    .or_else(|| reference.strip_prefix("heads/"))
+                    .or_else(|| {
+                        (!reference.starts_with("refs/") && !reference.starts_with("tags/"))
+                            .then_some(reference.as_str())
+                    });
+                if let Some(branch) = branch {
+                    candidates.push(format!("refs/remotes/origin/{branch}"));
+                }
+                for candidate in candidates {
+                    if let Ok(sha) = self.rev_parse(&candidate) {
+                        return Ok(sha);
+                    }
+                }
+                Err(OhpmError::git_ref_not_found(
+                    &repo_path(self.repo),
+                    reference,
+                ))
+            }
+            GitQuery::Semver(range) => {
+                let tags = self.tag_names()?;
+                let normalized = semver_max_satisfying(&tags, range)
+                    .ok_or_else(|| OhpmError::git_semver_no_match(&repo_path(self.repo), range))?;
+                // Preserve the original tag spelling when semver drops "v".
+                let tag = tags
+                    .iter()
+                    .find(|tag| {
+                        node_semver::Version::parse(tag)
+                            .map(|v| v.to_string())
+                            .ok()
+                            .as_deref()
+                            == Some(normalized.as_str())
+                    })
+                    .unwrap_or(&normalized);
+                self.rev_parse(&format!("refs/tags/{tag}"))
+            }
+            GitQuery::Path { inner, .. } => self.resolve(inner),
         }
-    })?;
-    Ok(id.to_string())
+    }
+
+    fn rev_parse(&self, spec: &str) -> Result<String> {
+        let id = self.repo.rev_parse_single(spec).map_err(|error| {
+            if error.to_string().to_lowercase().contains("ambiguous") {
+                OhpmError::git_ambiguous_ref(&repo_path(self.repo), spec, 2)
+            } else {
+                OhpmError::git_ref_not_found(&repo_path(self.repo), spec)
+            }
+        })?;
+        let object = id.object().map_err(|error| {
+            OhpmError::git_checkout_failed(&repo_path(self.repo), spec, &error.to_string())
+        })?;
+        // Annotated tags point to tag objects, not directly to commits.
+        let commit = object.peel_to_commit().map_err(|error| {
+            OhpmError::git_checkout_failed(&repo_path(self.repo), spec, &error.to_string())
+        })?;
+        Ok(commit.id.to_string())
+    }
+
+    /// All `refs/tags/<name>` names (deduplicated, `^{}` suffix stripped).
+    fn tag_names(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        let refs = self
+            .repo
+            .references()
+            .map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(self.repo), &e.to_string()))?;
+        for r in refs
+            .all()
+            .map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(self.repo), &e.to_string()))?
+        {
+            let r = r.map_err(|e| {
+                OhpmError::git_ls_remote_failed(&repo_path(self.repo), &e.to_string())
+            })?;
+            let name = r.name().as_bstr().to_string();
+            if let Some(tag) = name.strip_prefix("refs/tags/") {
+                let tag = tag.strip_suffix("^{}").unwrap_or(tag).to_string();
+                if !out.contains(&tag) {
+                    out.push(tag);
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
 }
 
 fn repo_path(repo: &gix::Repository) -> String {
     repo.path().display().to_string()
-}
-
-/// All `refs/tags/<name>` names (deduplicated, `^{}` suffix stripped).
-fn tag_names(repo: &gix::Repository) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    let refs = repo
-        .references()
-        .map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(repo), &e.to_string()))?;
-    for r in refs
-        .all()
-        .map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(repo), &e.to_string()))?
-    {
-        let r = r.map_err(|e| OhpmError::git_ls_remote_failed(&repo_path(repo), &e.to_string()))?;
-        let name = r.name().as_bstr().to_string();
-        if let Some(tag) = name.strip_prefix("refs/tags/") {
-            let tag = tag.strip_suffix("^{}").unwrap_or(tag).to_string();
-            if !out.contains(&tag) {
-                out.push(tag);
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// Materialize the pinned commit's tree (optionally a subdirectory) into
@@ -407,43 +440,65 @@ mod tests {
 
         // Tag refs resolve.
         assert_eq!(
-            resolve_commit_in(&repo, &GitQuery::Ref("v1.0.0".into())).unwrap(),
-            resolve_commit_in(&repo, &GitQuery::Ref("v1.0.0".into())).unwrap()
+            GitCommitResolver::new(&repo)
+                .resolve(&GitQuery::Ref("v1.0.0".into()))
+                .unwrap(),
+            GitCommitResolver::new(&repo)
+                .resolve(&GitQuery::Ref("v1.0.0".into()))
+                .unwrap()
         );
-        let v110 = resolve_commit_in(&repo, &GitQuery::Ref("v1.1.0".into())).unwrap();
-        let head = resolve_commit_in(&repo, &GitQuery::Head).unwrap();
+        let v110 = GitCommitResolver::new(&repo)
+            .resolve(&GitQuery::Ref("v1.1.0".into()))
+            .unwrap();
+        let head = GitCommitResolver::new(&repo)
+            .resolve(&GitQuery::Head)
+            .unwrap();
         assert_eq!(v110, head, "HEAD == latest tag commit");
 
         // Branch name resolves.
-        let master = resolve_commit_in(&repo, &GitQuery::Ref("master".into())).unwrap();
+        let master = GitCommitResolver::new(&repo)
+            .resolve(&GitQuery::Ref("master".into()))
+            .unwrap();
         assert_eq!(master, head);
 
         // Full SHA direct.
         assert_eq!(
-            resolve_commit_in(&repo, &GitQuery::Commit(v110.clone())).unwrap(),
+            GitCommitResolver::new(&repo)
+                .resolve(&GitQuery::Commit(v110.clone()))
+                .unwrap(),
             v110
         );
         // Short SHA prefix.
         assert_eq!(
-            resolve_commit_in(&repo, &GitQuery::Partial(v110[..10].into())).unwrap(),
+            GitCommitResolver::new(&repo)
+                .resolve(&GitQuery::Partial(v110[..10].into()))
+                .unwrap(),
             v110
         );
 
         // Semver picks the max matching tag.
-        let semver = resolve_commit_in(&repo, &GitQuery::Semver("^1.0.0".into())).unwrap();
+        let semver = GitCommitResolver::new(&repo)
+            .resolve(&GitQuery::Semver("^1.0.0".into()))
+            .unwrap();
         assert_eq!(semver, v110);
-        let err = resolve_commit_in(&repo, &GitQuery::Semver("^2.0.0".into())).unwrap_err();
+        let err = GitCommitResolver::new(&repo)
+            .resolve(&GitQuery::Semver("^2.0.0".into()))
+            .unwrap_err();
         assert_eq!(err.code, "GitSemverNoMatch");
 
         // Unknown ref.
-        let err = resolve_commit_in(&repo, &GitQuery::Ref("nope".into())).unwrap_err();
+        let err = GitCommitResolver::new(&repo)
+            .resolve(&GitQuery::Ref("nope".into()))
+            .unwrap_err();
         assert_eq!(err.code, "GitRefNotFound");
 
         // Materialize the v1.0.0 content (only the first commit's files).
         let dest = fx.dir.path().join("out");
         materialize_commit_in(
             &repo,
-            &resolve_commit_in(&repo, &GitQuery::Ref("v1.0.0".into())).unwrap(),
+            &GitCommitResolver::new(&repo)
+                .resolve(&GitQuery::Ref("v1.0.0".into()))
+                .unwrap(),
             None,
             &dest,
         )
@@ -463,7 +518,9 @@ mod tests {
 
         let tmp = fx.dir.path().join("clone");
         let repo = fetch_repo(&fx.url, &tmp).unwrap();
-        let head = resolve_commit_in(&repo, &GitQuery::Head).unwrap();
+        let head = GitCommitResolver::new(&repo)
+            .resolve(&GitQuery::Head)
+            .unwrap();
         let dest = fx.dir.path().join("out");
         materialize_commit_in(&repo, &head, None, &dest).unwrap();
         assert!(!dest.join(".git").exists(), "no .git in the store dir");

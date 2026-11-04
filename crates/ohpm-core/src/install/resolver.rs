@@ -827,6 +827,7 @@ impl Resolver {
                 locker.get_lock_spec(name, &relative_spec(self.lock_root(root_dir), &spec))
             })
             .await;
+        let locked = locked.or_else(|| query.pinned_key().map(|key| format!("{name}@{key}")));
         let (commit, manifest) = match locked {
             Some(value) => {
                 let (_, commit) = crate::install::lockfile::parse_spec_key(&value)
@@ -858,7 +859,7 @@ impl Resolver {
                 let tmp = self.project_root.join(MY_MODULES).join(".tmp").join(format!("git-{}", uuid::Uuid::new_v4().simple()));
                 std::fs::create_dir_all(tmp.parent().unwrap())?;
                 let repo = crate::install::git::fetch_repo(&url, &tmp)?;
-                let commit = crate::install::git::resolve_commit_in(&repo, &query)?;
+                let commit = crate::install::git::GitCommitResolver::new(&repo).resolve(&query)?;
                 let sub = crate::install::git::sub_dir_of(&query);
                 let commit_key = match sub {
                     Some(s) => format!("{commit}&path:{s}"),
