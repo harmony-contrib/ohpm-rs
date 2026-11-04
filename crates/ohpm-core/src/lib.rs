@@ -17,6 +17,7 @@ pub mod package;
 mod paths;
 pub mod publish;
 pub mod registry;
+pub mod scripts;
 pub mod version;
 pub mod workspace;
 

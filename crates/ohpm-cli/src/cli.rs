@@ -51,6 +51,33 @@ pub enum Command {
     Update(UpdateArgs),
     /// Uninstall package(s).
     Uninstall(UninstallArgs),
+    /// Run a script defined in oh-package.json5.
+    Run(RunArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+#[command(override_usage = "ohpm-rs run [OPTIONS] <alias> [-- <args>...]")]
+pub struct RunArgs {
+    /// Script alias in the scripts section of oh-package.json5.
+    pub alias: String,
+    /// Append or override script parameters: --key value, --key=value, or -key=value.
+    #[arg(value_name = "args")]
+    pub args: Vec<String>,
+    /// Package directory, or workspace search directory with --workspace/--filter.
+    #[arg(long, value_name = "directory")]
+    pub prefix: Option<std::path::PathBuf>,
+    /// Run the script in workspace members that define it.
+    #[arg(long)]
+    pub workspace: bool,
+    /// Run only in these workspace packages (exact names, comma-separated).
+    #[arg(long, value_delimiter = ',')]
+    pub filter: Vec<String>,
+    /// Specify the log level for this command.
+    #[arg(long = "log_level", value_parser = ["info", "debug", "warn", "error"])]
+    pub log_level: Option<String>,
+    /// Enable debug logging for this command.
+    #[arg(long)]
+    pub debug: bool,
 }
 
 #[derive(Args, Debug, Clone)]

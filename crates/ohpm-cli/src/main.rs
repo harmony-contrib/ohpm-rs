@@ -39,5 +39,6 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Install(args) => commands::install::run(&args).await,
         Command::Update(args) => commands::update::run(&args).await,
         Command::Uninstall(args) => commands::uninstall::run(&args).await,
+        Command::Run(args) => commands::run::run(&args).await,
     }
 }

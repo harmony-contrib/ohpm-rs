@@ -15,6 +15,7 @@ pub mod ping;
 pub mod prepublish;
 pub mod publish;
 pub mod root;
+pub mod run;
 pub mod unpublish;
 pub mod version;
 
