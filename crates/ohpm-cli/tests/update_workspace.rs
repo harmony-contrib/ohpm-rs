@@ -363,3 +363,85 @@ fn workspace_update_stops_after_the_first_failed_member() {
     assert!(!broken.join("oh-package-lock.json5").exists());
     fixture.assert_untouched(&last);
 }
+
+#[test]
+fn invalid_tag_filter_fails_before_hooks_or_existing_package_files_change() {
+    let fixture = WorkspaceFixture::new();
+    fixture.succeed(&fixture.root, &["update", "--filter", "@fixture/app"]);
+    fixture.member(
+        "app",
+        "1.0.0",
+        json!({
+            "dependencies": {"@fixture/library": "workspace:*"},
+            "hooks": {"preInstall": "echo unexpected > hook-ran.txt"}
+        }),
+    );
+    fixture.member("library", "1.1.0", json!({}));
+    let manifest_path = fixture.app.join("oh-package.json5");
+    let lock_path = fixture.app.join("oh-package-lock.json5");
+    let original_manifest = fs::read(&manifest_path).unwrap();
+    let original_lock = fs::read(&lock_path).unwrap();
+    let output = fixture.run(
+        &fixture.root,
+        &["update", "--filter", "@fixture/app", "--tag-filter", "["],
+    );
+    assert!(
+        !output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("tag-filter"));
+    assert!(!fixture.app.join("hook-ran.txt").exists());
+    assert_eq!(fs::read(manifest_path).unwrap(), original_manifest);
+    assert_eq!(fs::read(lock_path).unwrap(), original_lock);
+    fixture.assert_untouched(&fixture.library);
+}
+
+#[test]
+fn all_modules_explicitly_updates_every_module_when_install_all_is_disabled() {
+    let fixture = WorkspaceFixture::new();
+    let second = fixture.member(
+        "second",
+        "1.0.0",
+        json!({"dependencies": {"@fixture/library": "workspace:*"}}),
+    );
+    WorkspaceFixture::write_json(
+        &fixture.root.join("oh-package.json5"),
+        &json!({"name": "@fixture/root", "version": "1.0.0"}),
+    );
+    WorkspaceFixture::write_json(
+        &fixture.root.join("build-profile.json5"),
+        &json!({"modules": [
+            {"name": "app", "srcPath": "./packages/app"},
+            {"name": "second", "srcPath": "./packages/second"}
+        ]}),
+    );
+    fs::write(fixture.root.join(".ohpmrc"), "install_all=false\n").unwrap();
+    fixture.succeed(&fixture.root, &["update", "--all-modules"]);
+    for member in [&fixture.app, &second] {
+        assert_eq!(fixture.lock_version(member, "@fixture/library"), "1.0.0");
+    }
+
+    fixture.member("library", "1.1.0", json!({}));
+    fixture.succeed(&fixture.app, &["update", "@fixture/library"]);
+    assert_eq!(
+        fixture.lock_version(&fixture.app, "@fixture/library"),
+        "1.1.0"
+    );
+    assert_eq!(fixture.lock_version(&second, "@fixture/library"), "1.0.0");
+
+    fixture.member("library", "1.2.0", json!({}));
+    fixture.succeed(
+        &fixture.app,
+        &["update", "@fixture/library", "--all-modules"],
+    );
+    for member in [&fixture.app, &second] {
+        assert_eq!(fixture.lock_version(member, "@fixture/library"), "1.2.0");
+        assert_eq!(
+            WorkspaceFixture::read_json(&member.join("oh-package.json5"))["dependencies"]
+                ["@fixture/library"],
+            "workspace:*"
+        );
+    }
+}
