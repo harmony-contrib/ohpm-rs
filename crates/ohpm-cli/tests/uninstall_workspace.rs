@@ -65,6 +65,7 @@ impl Fixture {
             .env("OHPM_REGISTRY", "http://127.0.0.1:9/")
             .env("OHPM_LOG_LEVEL", "error")
             .env("OHPM_INSTALL_ALL", "true")
+            .env_remove("OHPM_ENFORCE_DEPENDENCY_KEY")
             .output()
             .unwrap()
     }
@@ -215,6 +216,64 @@ fn ordinary_package_uninstall_accepts_a_relative_prefix() {
     fixture.removed("app", "runtime", "dependencies");
     assert!(fixture.dir("app").join("oh_modules/development").exists());
     assert!(fixture.dir("private").join("oh_modules/runtime").exists());
+}
+
+#[test]
+fn external_prefix_loads_workspace_config_and_reports_failed_member() {
+    let fixture = Fixture::new();
+    fixture.write_manifest(
+        "app",
+        json!({
+            "name": "app", "version": "1.0.0",
+            "dependencies": {
+                "runtime": "workspace:*",
+                "wrong-name": "file:../development"
+            }
+        }),
+    );
+    let original = fs::read(fixture.dir("app").join("oh-package.json5")).unwrap();
+    let outside = fixture.root.parent().unwrap();
+    fs::write(outside.join(".ohpmrc"), "enforce_dependency_key=false\n").unwrap();
+    fs::write(
+        fixture.root.join(".ohpmrc"),
+        "enforce_dependency_key=true\n",
+    )
+    .unwrap();
+    let args = [
+        "uninstall",
+        "runtime",
+        "--filter",
+        "app",
+        "--prefix",
+        "workspace space 卸载",
+    ];
+    let output = fixture.run(outside, &args);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Failed to uninstall "), "{stderr}");
+    assert!(
+        stderr.contains(&Path::new("packages").join("app").display().to_string()),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("does not match the actual name"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read(fixture.dir("app").join("oh-package.json5")).unwrap(),
+        original
+    );
+
+    // Inverting both files proves that the caller's unrelated config never wins.
+    fs::write(outside.join(".ohpmrc"), "enforce_dependency_key=true\n").unwrap();
+    fs::write(
+        fixture.root.join(".ohpmrc"),
+        "enforce_dependency_key=false\n",
+    )
+    .unwrap();
+    fixture.succeed(outside, &args);
+    fixture.removed("app", "runtime", "dependencies");
+    assert!(fixture.dir("app").join("oh_modules/wrong-name").exists());
 }
 
 #[test]

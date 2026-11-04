@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use ohpm_core::config::Config;
 use ohpm_core::error::OhpmError;
 use ohpm_core::install::modules::ModuleScope;
@@ -37,13 +37,30 @@ impl<'a> UninstallRunner<'a> {
             }
             ohpm_core::install::spec::validate_name(package)?;
         }
-        let workspace_mode = args.workspace || !args.filter.is_empty();
-        let prefixes = if workspace_mode {
-            Self::workspace_prefixes(args)?
+        let workspace = if args.workspace || !args.filter.is_empty() {
+            Some(Self::find_workspace(args)?)
+        } else {
+            None
+        };
+        let prefixes = if let Some(workspace) = &workspace {
+            let mut prefixes: Vec<PathBuf> = workspace
+                .filtered_members(&args.filter)?
+                .into_iter()
+                .map(|member| member.dir.clone())
+                .collect();
+            prefixes.sort();
+            prefixes.dedup();
+            prefixes
         } else {
             vec![std::env::current_dir()?.join(resolve_prefix(args.prefix.as_deref(), "uninstall")?)]
         };
-        let mut config = load_config()?;
+        let mut config = if let Some(workspace) = &workspace {
+            let mut config = Config::new();
+            config.load(&workspace.root, None)?;
+            config
+        } else {
+            load_config()?
+        };
         apply_cli_options(
             &mut config,
             args.fetch_timeout,
@@ -57,7 +74,7 @@ impl<'a> UninstallRunner<'a> {
         let options = InstallOptions {
             save: !args.no_save,
             all: args.all,
-            module_scope: if workspace_mode {
+            module_scope: if workspace.is_some() {
                 ModuleScope::Package
             } else {
                 ModuleScope::Project
@@ -81,7 +98,7 @@ impl<'a> UninstallRunner<'a> {
         })
     }
 
-    fn workspace_prefixes(args: &UninstallArgs) -> Result<Vec<PathBuf>> {
+    fn find_workspace(args: &UninstallArgs) -> Result<Workspace> {
         let cwd = std::env::current_dir()?;
         let anchor = args
             .prefix
@@ -94,20 +111,12 @@ impl<'a> UninstallRunner<'a> {
                 anchor.display()
             );
         }
-        let workspace = Workspace::find(&anchor)?.ok_or_else(|| {
+        Workspace::find(&anchor)?.ok_or_else(|| {
             anyhow!(
                 "No {WORKSPACE_CONFIG} found walking up from {}; --workspace/--filter require a workspace.",
                 anchor.display()
             )
-        })?;
-        let mut prefixes: Vec<PathBuf> = workspace
-            .filtered_members(&args.filter)?
-            .into_iter()
-            .map(|member| member.dir.clone())
-            .collect();
-        prefixes.sort();
-        prefixes.dedup();
-        Ok(prefixes)
+        })
     }
 
     async fn run(self) -> Result<()> {
@@ -124,7 +133,8 @@ impl<'a> UninstallRunner<'a> {
                 &self.args.pkg,
                 &options,
             )
-            .await?;
+            .await
+            .with_context(|| format!("Failed to uninstall {}", prefix.display()))?;
         }
         let elapsed = start.elapsed().as_millis();
         output::succeed(&format!(
