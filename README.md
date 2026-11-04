@@ -13,8 +13,9 @@ ohpm-rs (OpenHarmony package manager), a Rust reimplementation of ohpm
 
 Commands:
   install     Install package(s) from the registry or local sources
-  update      Update package(s) to their latest version
+  update      Update package(s) within their declared version ranges
   uninstall   Uninstall package(s)
+  clean       Remove installed modules and lockfiles
   publish     Publish a package to the registry
   prepublish  Pre-verify package content without publishing
   init        Create an oh-package.json5 file
@@ -269,6 +270,9 @@ Rules:
 | Command                                            | Workspace mode                                                                                                                                                        |
 | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `install`                                          | `--workspace` installs every member, including `publish: false`; `--filter <pkgs>` selects members by exact name; combine with `--all` to install their build-profile modules |
+| `update` / `up`                                    | `--workspace` updates every member; `--filter <pkgs>` selects exact names; preserves declared ranges and Git refs |
+| `uninstall`                                        | `--workspace` removes named dependencies from every member; `--filter <pkgs>` selects exact names; `--no-save` preserves manifests |
+| `clean`                                            | `--workspace` removes every member's installed modules and lockfiles; `--filter <pkgs>` selects exact names; `--keep-lockfile` preserves lockfiles |
 | `publish` / `prepublish`                           | `file:` deps rewritten to member versions before upload; accepts a member directory (auto-pack); `--workspace`/`--filter` publish every (selected) publishable member |
 | `pack`                                             | `--workspace` packs every publishable member; `--filter <pkgs>` selects; `publish: false` skipped                                                                     |
 | `list`                                             | `-r/--recursive` lists every member's graph; at the workspace root all members are listed by default                                                                  |
@@ -288,6 +292,54 @@ ohpm-rs install --workspace
 ohpm-rs install --filter @demo/app,@demo/lib
 ohpm-rs install --workspace --all --prefix ./my-workspace
 ```
+
+### Updating, uninstalling, and cleaning
+
+These commands accept `--prefix <dir>` from outside the workspace. `--filter`
+implies workspace mode and accepts comma-separated exact package names. Selected
+members include `publish: false` packages, respect YAML exclusions, and run once
+in path order. Invalid selections fail before changing any member; execution
+stops at the first member failure. The workspace root needs no manifest and is
+only processed if included as a member.
+
+```sh
+ohpm-rs update --workspace
+ohpm-rs up package-a package-b --filter @demo/app,@demo/tools
+ohpm-rs uninstall package-a package-b --workspace --prefix ./my-workspace
+ohpm-rs uninstall package-a --filter @demo/app --no-save
+ohpm-rs clean --workspace --keep-lockfile
+ohpm-rs clean --filter @demo/app --prefix ./my-workspace
+ohpm-rs clean --prefix ./standalone-package
+```
+
+`update` with no package names refreshes all dependencies in the selected scope.
+Named updates refresh only those dependencies. Registry versions stay within the
+manifest's declared range; changing that range uses `install package@version`.
+Like ohpm, `update package@version` is rejected and `--latest` is not supported.
+`--tag-filter <regex>` restricts updates to matching `tag:` declarations; invalid
+regular expressions fail before lifecycle hooks run.
+
+Git updates keep the original manifest declaration and refresh its resolved
+commit: HEAD and branch dependencies follow new commits, tags resolve their
+current target (including annotated tags), and `#semver:<range>` selects the
+highest matching tag. Full commit pins stay fixed and reuse cached content even
+offline. `#path:<dir>` and combined ref/subdirectory fragments remain supported.
+Ordinary `install` continues to honor the lockfile's pinned commit.
+
+Workspace update/uninstall operates only on selected members, regardless of
+`install_all` or enclosing build profiles. `--all` and `update --all-modules`
+belong to the build-profile project mode and cannot be combined with workspace
+selection. `update --all-modules` explicitly refreshes every project module even
+when `install_all=false`.
+
+`uninstall` removes names from dependencies, devDependencies, and
+dynamicDependencies, then updates links and the lockfile. `--no-save` retains
+the manifest, so a later install can restore the dependencies.
+
+Outside workspace mode, `clean` cleans the enclosing build-profile project and
+its modules, or the nearest standalone package. It removes `oh_modules` and
+`oh-package*-lock.json5`; `--keep-lockfile` retains all those lockfiles. It does
+not remove the global cache (`cache clean` handles that).
 
 ### Versioning
 

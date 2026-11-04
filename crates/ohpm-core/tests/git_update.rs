@@ -222,7 +222,9 @@ async fn update_selects_new_git_semver_tags_within_the_declared_range() {
 #[tokio::test]
 async fn update_keeps_full_commit_pins_and_reuses_cached_content_offline() {
     let fx = GitProject::new();
-    let pinned = fx.commit_package("packages/lib", "1.0.0");
+    let pinned = fx
+        .commit_package("packages/lib", "1.0.0")
+        .to_ascii_uppercase();
     fx.dependencies(&[("gitpkg", &format!("#{pinned}&path:packages/lib"))]);
     fx.install().await;
     let before = fx.lock();
@@ -255,4 +257,19 @@ async fn failed_git_update_preserves_the_existing_lock_and_links() {
     assert_eq!(error.code, "GitLsRemoteFailed");
     assert_eq!(fx.lock(), before);
     assert_eq!(fx.version("gitpkg"), "1.0.0");
+}
+
+#[tokio::test]
+async fn update_fetches_git_prefixed_urls_and_preserves_the_declared_protocol() {
+    let mut fx = GitProject::new();
+    fx.url = format!("git+{}", fx.url);
+    fx.commit_package("", "1.0.0");
+    fx.dependencies(&[("gitpkg", "#main")]);
+    let manifest = fx.manifest();
+    fx.install().await;
+    fx.commit_package("", "1.1.0");
+    fx.update(&[]).await;
+    assert_eq!(fx.version("gitpkg"), "1.1.0");
+    assert_eq!(fx.manifest(), manifest);
+    assert!(fx.lock().to_string().contains(&fx.url));
 }

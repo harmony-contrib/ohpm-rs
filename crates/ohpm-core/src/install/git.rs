@@ -34,7 +34,7 @@ pub enum GitQuery {
 impl GitQuery {
     pub(crate) fn pinned_key(&self) -> Option<String> {
         match self {
-            Self::Commit(sha) => Some(sha.to_ascii_lowercase()),
+            Self::Commit(sha) => Some(sha.clone()),
             Self::Path { sub, inner } => inner.pinned_key().map(|sha| format!("{sha}&path:{sub}")),
             _ => None,
         }
@@ -91,7 +91,8 @@ pub fn sub_dir_of(query: &GitQuery) -> Option<&str> {
 
 /// `prepare_clone` + `fetch_only` (full fetch of all refs).
 pub fn fetch_repo(url: &str, tmp: &Path) -> Result<gix::Repository> {
-    let mut prep = gix::prepare_clone(url, tmp)
+    let transport_url = url.strip_prefix("git+").unwrap_or(url);
+    let mut prep = gix::prepare_clone(transport_url, tmp)
         .map_err(|e| OhpmError::git_ls_remote_failed(url, &e.to_string()))?;
     let (repo, _outcome) = prep
         .fetch_only(gix::progress::Discard, &AtomicBool::new(false))
@@ -112,7 +113,7 @@ impl<'a> GitCommitResolver<'a> {
 
     pub(crate) fn resolve(&self, query: &GitQuery) -> Result<String> {
         match query {
-            GitQuery::Commit(sha) => Ok(sha.to_ascii_lowercase()),
+            GitQuery::Commit(sha) => Ok(sha.clone()),
             GitQuery::Partial(prefix) => self.rev_parse(prefix),
             GitQuery::Head => self.rev_parse("HEAD"),
             GitQuery::Ref(reference) => {
