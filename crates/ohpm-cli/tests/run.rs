@@ -55,6 +55,15 @@ impl Fixture {
             .to_owned()
     }
 
+    fn echo_lines(&self, name: &str) -> Vec<String> {
+        // cmd.exe's echo retains spaces around removed redirections. These
+        // assertions concern line order and arguments, not native echo spacing.
+        self.contents(name)
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect()
+    }
+
     fn workspace(&self) {
         fs::write(
             self.root.join("ohpm-workspace.yaml"),
@@ -97,7 +106,7 @@ fn workspace_runs_private_members_in_path_order_and_skips_missing_and_excluded_s
     fixture.member("excluded", "@fixture/excluded", json!({"build": "exit 1"}));
     let output = fixture.succeed(&["build", "--workspace", "--", "--mode=release"]);
     assert_eq!(
-        fixture.contents("order.txt").lines().collect::<Vec<_>>(),
+        fixture.echo_lines("order.txt"),
         ["a --mode=release", "b --mode=release"]
     );
     assert!(!fixture.root.join("root.txt").exists());
@@ -144,10 +153,7 @@ fn workspace_filter_implies_batch_mode_deduplicates_and_supports_prefix_without_
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        fixture.contents("order.txt").lines().collect::<Vec<_>>(),
-        ["a", "b"]
-    );
+    assert_eq!(fixture.echo_lines("order.txt"), ["a", "b"]);
     let member = fixture.root.join("packages/a");
     let output = fixture
         .command()
@@ -156,10 +162,7 @@ fn workspace_filter_implies_batch_mode_deduplicates_and_supports_prefix_without_
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(
-        fixture.contents("order.txt").lines().collect::<Vec<_>>(),
-        ["a", "b", "b"]
-    );
+    assert_eq!(fixture.echo_lines("order.txt"), ["a", "b", "b"]);
 }
 
 #[test]
@@ -316,14 +319,14 @@ fn parameters_override_both_key_forms_and_only_reach_the_last_command() {
     fixture.succeed(&["build", "--", "--name", "new", "-extra=a=b", "--flag"]);
     assert_eq!(fixture.contents("first.txt"), "first --name original");
     assert_eq!(
-        fixture.contents("last.txt"),
-        "last --keep yes --name new -extra=a=b --flag"
+        fixture.echo_lines("last.txt"),
+        ["last --keep yes --name new -extra=a=b --flag"]
     );
     // Help/debug/log_level after the separator belong to the script.
     fixture.succeed(&["build", "--", "--help", "--debug", "--log_level=warn"]);
     assert_eq!(
-        fixture.contents("last.txt"),
-        "last -name=old --keep yes --help --debug --log_level=warn"
+        fixture.echo_lines("last.txt"),
+        ["last -name=old --keep yes --help --debug --log_level=warn"]
     );
     assert!(!fixture.run(&["build", "--name", "new"]).status.success());
 }
