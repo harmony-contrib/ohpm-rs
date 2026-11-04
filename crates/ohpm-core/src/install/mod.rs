@@ -169,6 +169,7 @@ pub async fn update(
     args: &[String],
     opts: &InstallOptions,
 ) -> Result<UpdateOutcome> {
+    valid_cli_options("update", opts)?;
     // `PackageUtil.parse` — update arguments must not carry versions.
     for raw in args {
         if let Some(version) = root::parse_cli_pkg_version(raw) {
@@ -217,6 +218,10 @@ pub async fn uninstall(
 /// retry_times / retry_interval ranges).
 pub fn valid_cli_options(command: &str, opts: &InstallOptions) -> Result<()> {
     let invalid = |result: String| OhpmError::option_invalid(command, &result);
+    if let Some(filter) = &opts.tag_filter {
+        regex::Regex::new(filter)
+            .map_err(|error| invalid(format!(" - invalid tag-filter regex: {error}")))?;
+    }
     if let Some(registry) = &opts.registry {
         let mut entries: Vec<&str> = registry.split(',').collect();
         if entries.iter().any(|e| e.trim().is_empty()) {
