@@ -25,9 +25,68 @@ Commands:
   list        Display the dependency graph (basic)
   ping        Test network connectivity to the registry
   root        Print the effective oh_modules folder
+  run         Run a script defined in oh-package.json5
   version     Bump the package version
   cache       Manage the ohpm cache folder
 ```
+
+## Running scripts
+
+`ohpm-rs run <alias> [-- <args...>]` executes an entry from the `scripts`
+section of `oh-package.json5`, using the nearest package directory as its
+working directory. Use `--prefix <directory>` to select a package explicitly.
+
+```json5
+{
+  scripts: {
+    build: "node build.js --mode debug",
+    release: "ohpm run build -- --mode release",
+  },
+}
+```
+
+```sh
+ohpm-rs run build
+ohpm-rs run build -- --mode release --verbose
+ohpm-rs run release --prefix ./entry
+```
+
+Behavior follows the ohpm script compiler (checked against 26.0.0.630):
+
+- Parameters after `--` append or replace matching `-key`/`--key` parameters,
+  including `--key=value` forms; they apply to the last command in an alias.
+- Nested `ohpm run` aliases are expanded internally, without requiring ohpm on
+  `PATH`. Alias references and cycles are checked before execution. Other ohpm
+  commands in scripts are rejected.
+- Aliases start with a lowercase letter, contain only letters, digits, `:`,
+  `_`, or `-`, and are at most 128 characters long. Passed parameters are
+  limited to 2048 UTF-16 code units including spaces.
+- `&&` and `||` outside quotes separate commands. As in ohpm, the first
+  short circuit ends the current alias, including any later operators.
+  Nested `ohpm run` with ` -- ` cannot be combined with logical operators.
+- Scripts use `$SHELL` (or `sh`) on Unix and `%ComSpec%` (or `cmd`) on Windows,
+  inheriting the environment and standard streams. A failed script makes the
+  CLI exit with status 1. `--log_level` and `--debug` are also supported.
+
+As an extension, missing script aliases suggest up to three similar names
+(for example, `biuld` suggests `build`). Suggestions never run automatically;
+errors from an existing script retain their original failure details.
+
+Workspace mode uses the existing `ohpm-workspace.yaml` membership and filters:
+
+```sh
+ohpm-rs run build --workspace
+ohpm-rs run build --filter @example/app,@example/library -- --mode release
+ohpm-rs run build --workspace --prefix /path/to/workspace
+```
+
+`--filter` also enables workspace mode. Members run sequentially in directory
+order, including packages with `publish: false`; excluded packages are omitted.
+Members without the requested script are skipped, and the command fails if no
+selected member defines it. All selected scripts are checked before execution;
+the first runtime failure stops the remaining packages. The workspace root
+does not need an `oh-package.json5` and runs only if listed as a member.
+Typo suggestions in workspace mode use only the selected members' scripts.
 
 ## Architecture
 

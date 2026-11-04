@@ -38,6 +38,7 @@ aes.workspace = true
 des.workspace = true
 cbc.workspace = true
 pathdiff.workspace = true
+strsim.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 junction.workspace = true
