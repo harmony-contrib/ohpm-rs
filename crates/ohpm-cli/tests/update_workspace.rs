@@ -445,3 +445,33 @@ fn all_modules_explicitly_updates_every_module_when_install_all_is_disabled() {
         );
     }
 }
+
+#[test]
+fn normal_update_resolves_relative_prefix_before_workspace_dependencies() {
+    let fixture = WorkspaceFixture::new();
+    fixture.succeed(&fixture.app, &["update", "--prefix", "."]);
+    assert_eq!(
+        fixture.lock_version(&fixture.app, "@fixture/library"),
+        "1.0.0"
+    );
+    fixture.member("library", "1.1.0", json!({}));
+    fixture.succeed(
+        fixture.root.parent().unwrap(),
+        &[
+            "update",
+            "@fixture/library",
+            "--prefix",
+            "workspace space 库/packages/app",
+        ],
+    );
+    assert_eq!(
+        fixture.lock_version(&fixture.app, "@fixture/library"),
+        "1.1.0"
+    );
+    let lock = WorkspaceFixture::read_json(&fixture.app.join("oh-package-lock.json5"));
+    assert_eq!(
+        lock["specifiers"]["@fixture/library@workspace:*"],
+        "@fixture/library@../library"
+    );
+    fixture.assert_untouched(&fixture.library);
+}

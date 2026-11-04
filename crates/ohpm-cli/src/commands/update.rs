@@ -50,7 +50,8 @@ impl<'a> UpdateRunner<'a> {
             prefixes.dedup();
             prefixes
         } else {
-            vec![resolve_prefix(args.prefix.as_deref(), "update")?]
+            let prefix = resolve_prefix(args.prefix.as_deref(), "update")?;
+            vec![std::env::current_dir()?.join(prefix)]
         };
 
         let mut config = if let Some(workspace) = &workspace {
