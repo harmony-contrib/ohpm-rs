@@ -1,0 +1,49 @@
+[workspace]
+release_always = false
+changelog_update = true
+dependencies_update = false
+git_tag_name = "{{ package }}-v{{ version }}"
+git_release_name = "{{ package }} v{{ version }}"
+repo_url = "https://github.com/harmony-contrib/ohpm-rs"
+semver_check = false
+publish_timeout = "30m"
+
+[changelog]
+header = """# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+"""
+
+body = """
+
+## [{{ version }}]{%- if release_link -%}({{ release_link }}){% endif %} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}*({{ commit.scope }})* {% endif %}{% if commit.breaking %}[**breaking**] {% endif %}{{ commit.message }}
+{% endfor -%}
+{% endfor -%}
+"""
+
+trim = true
+
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^changed", group = "Changed" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^.*", group = "Other" },
+]
+
+[[package]]
+name = "ohpm-core"
+changelog_path = "crates/ohpm-core/CHANGELOG.md"
+
+[[package]]
+name = "ohpm-cli"
+changelog_path = "crates/ohpm-cli/CHANGELOG.md"
+changelog_include = ["ohpm-core"]

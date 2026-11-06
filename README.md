@@ -170,6 +170,45 @@ workspace retargeting, cleanup, local HAR installs, packing, prepublish checks, 
 unified version changes under paths containing spaces and Unicode. Registry tests
 use local mock servers and need no publishing credentials.
 
+## Releasing the Rust crates
+
+The [Release-plz workflow](.github/workflows/release.yml) follows
+[openharmony-ability](https://github.com/harmony-contrib/openharmony-ability/blob/main/.github/workflows/release.yml)
+and runs on pushes to `main`. It can also be run manually on `main`.
+
+1. After a Release PR is merged, `release-plz release` publishes `ohpm-core`
+   and then `ohpm-cli` to crates.io, and creates a tag and GitHub Release for
+   each crate (`ohpm-core-v<version>` and `ohpm-cli-v<version>`).
+2. Once that job succeeds, `release-plz release-pr` creates or updates the next
+   Release PR with version, internal dependency, lockfile, and changelog changes.
+3. Review the Release PR and merge it after Platform CI passes to publish the
+   next version. Keep its `release-plz-` branch prefix so release-plz can
+   recognize it.
+
+[release-plz.toml](release-plz.toml) sets `release_always = false`, so ordinary
+commits prepare a Release PR without publishing. Both crates keep the shared
+`workspace.package.version`; their changelogs live in
+[`ohpm-core/CHANGELOG.md`](crates/ohpm-core/CHANGELOG.md) and
+[`ohpm-cli/CHANGELOG.md`](crates/ohpm-cli/CHANGELOG.md). The CLI changelog also
+includes core changes. Commit messages such as `feat:`, `fix:`, and `changed:`
+populate the Added, Fixed, and Changed sections; other commits go under Other.
+
+Configure these repository Actions secrets before publishing:
+
+- `CARGO_REGISTRY_TOKEN`: a crates.io token with permission to publish both
+  `ohpm-core` and `ohpm-cli`.
+- `RELEASE_TOKEN` (recommended): a GitHub token with Contents and Pull requests
+  read/write access to this repository. The workflow falls back to
+  `GITHUB_TOKEN` when it is absent. PRs created with `GITHUB_TOKEN` do not
+  automatically trigger Platform CI; use `RELEASE_TOKEN` for that automation
+  (see the [release-plz token guide](https://release-plz.dev/docs/github/token)).
+
+When using the `GITHUB_TOKEN` fallback, enable **Settings → Actions → General →
+Workflow permissions → Allow GitHub Actions to create and approve pull requests**.
+If publishing fails, rerun the failed workflow after fixing the cause; release-plz
+skips crate versions that are already published. For a manual retry, select `main`
+while its latest commit is still the merged Release PR.
+
 ## Environment-variable authentication (CI)
 
 All auth inputs are read from `OHPM_*` environment variables, which override
