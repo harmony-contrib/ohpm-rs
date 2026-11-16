@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2](https://github.com/harmony-contrib/ohpm-rs/compare/ohpm-cli-v0.6.1...ohpm-cli-v0.6.2) - 2026-11-16
+
+### Other
+
+- publish prebuilt binaries for cargo-binstall ([#8](https://github.com/harmony-contrib/ohpm-rs/pull/8))
+
 ## [0.6.1](https://github.com/harmony-contrib/ohpm-rs/compare/ohpm-cli-v0.6.0...ohpm-cli-v0.6.1) - 2026-11-06
 
 ### Other
