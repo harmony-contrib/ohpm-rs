@@ -8,6 +8,31 @@ variables — no TUI prompts.** This makes CI/CD publishing unattended, which th
 original Node implementation cannot do (it prompts for the private-key
 passphrase interactively).
 
+## Installation
+
+Install a prebuilt binary with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
+
+```sh
+cargo binstall ohpm-cli
+ohpm-rs --version
+```
+
+The crate is named `ohpm-cli`; the installed command is `ohpm-rs`. Releases
+published with the binary workflow provide x86_64 and ARM64 builds for Linux
+(glibc 2.35+), macOS, and Windows. Archives and `SHA256SUMS` are attached to the
+[`ohpm-cli` GitHub Releases](https://github.com/harmony-contrib/ohpm-rs/releases).
+Older releases and other targets may fall back to building from source. To
+require a binary from this repository, use
+`cargo binstall ohpm-cli --strategies crate-meta-data`.
+
+To build from source explicitly:
+
+```sh
+cargo install ohpm-cli --locked
+```
+
+## Commands
+
 ```
 ohpm-rs (OpenHarmony package manager), a Rust reimplementation of ohpm
 
@@ -179,6 +204,11 @@ and runs on pushes to `main`. It can also be run manually on `main`.
 1. After a Release PR is merged, `release-plz release` publishes `ohpm-core`
    and then `ohpm-cli` to crates.io, and creates a tag and GitHub Release for
    each crate (`ohpm-core-v<version>` and `ohpm-cli-v<version>`).
+   When `ohpm-cli` is released, the same workflow builds all six platform/CPU
+   combinations from that tag, smoke-tests the packaged executables, and uploads
+   the archives and checksums to its GitHub Release. It then verifies
+   `cargo binstall` against the published crate and Linux binary, with source
+   compilation and third-party binary sources disabled.
 2. Once that job succeeds, `release-plz release-pr` creates or updates the next
    Release PR with version, internal dependency, lockfile, and changelog changes.
 3. Review the Release PR and merge it after Platform CI passes to publish the
@@ -208,6 +238,8 @@ Workflow permissions → Allow GitHub Actions to create and approve pull request
 If publishing fails, rerun the failed workflow after fixing the cause; release-plz
 skips crate versions that are already published. For a manual retry, select `main`
 while its latest commit is still the merged Release PR.
+If only a binary job fails, use **Re-run failed jobs** to retain the original
+release output and retry the binary build/upload.
 
 ## Environment-variable authentication (CI)
 

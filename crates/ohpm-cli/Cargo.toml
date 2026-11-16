@@ -13,6 +13,11 @@ description = "ohpm (OpenHarmony package manager) CLI reimplemented in Rust"
 name = "ohpm-rs"
 path = "src/main.rs"
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/{ name }-v{ version }/{ name }-v{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "{ bin }{ binary-ext }"
+
 [dependencies]
 ohpm-core.workspace = true
 clap.workspace = true
