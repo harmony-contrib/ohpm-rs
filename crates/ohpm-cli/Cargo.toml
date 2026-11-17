@@ -27,6 +27,8 @@ serde_json.workspace = true
 json5.workspace = true
 log.workspace = true
 dirs.workspace = true
+dialoguer.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
