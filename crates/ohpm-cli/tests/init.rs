@@ -208,6 +208,44 @@ fn hsp_scaffold_creates_a_shared_library_project() {
 }
 
 #[test]
+fn native_init_scaffolds_rust_project_and_package() {
+    let fixture = Fixture::new();
+    let target = fixture.root.join("Native");
+    fs::create_dir_all(&target).unwrap();
+
+    fixture.succeed(
+        &target,
+        &[
+            "init",
+            "--type",
+            "native",
+            "--package",
+            "@demo/native",
+            "my-native",
+        ],
+    );
+
+    let project = target.join("my-native");
+    for path in [
+        "Cargo.toml",
+        "build.rs",
+        "src/lib.rs",
+        ".gitignore",
+        "package/oh-package.json5",
+        "package/index.ets",
+        "package/src/main/module.json5",
+    ] {
+        assert!(project.join(path).is_file(), "missing {path}");
+    }
+
+    let cargo = fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    assert!(cargo.contains("my-native"), "{cargo}");
+
+    let manifest = read_json5(&project.join("package/oh-package.json5"));
+    assert_eq!(manifest["name"], "@demo/native");
+}
+
+#[test]
 fn api_version_controls_model_and_sdk() {
     let fixture = Fixture::new();
     let target = fixture.root.join("Api20");
