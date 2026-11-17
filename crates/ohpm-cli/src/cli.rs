@@ -21,7 +21,7 @@ pub enum Command {
     Prepublish(PrepublishArgs),
     /// Build a har package from a source directory.
     Pack(PackArgs),
-    /// Create an oh-package.json5 file.
+    /// Create an oh-package.json5 file or a standard HarmonyOS project.
     Init(InitArgs),
     /// Manage the ohpm configuration file.
     Config(ConfigArgs),
@@ -153,13 +153,41 @@ pub struct PackArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(override_usage = "ohpm-rs init [OPTIONS] [name]")]
 pub struct InitArgs {
-    /// Create a default oh-package.json5 file.
-    #[arg(short = 'y', long)]
-    pub yes: bool,
+    /// Package, module, or project name (defaults to the directory name).
+    #[arg(value_name = "name")]
+    pub name: Option<String>,
+    /// Template to create: package (only oh-package.json5), har (static
+    /// library project), hsp (shared library project), or project (application
+    /// project with an entry module). Without --type, an interactive terminal
+    /// gets a TUI; otherwise the legacy package manifest is written.
+    #[arg(
+        short = 't',
+        long = "type",
+        value_name = "type",
+        value_parser = ["package", "pkg", "har", "hsp", "project", "app"]
+    )]
+    pub project_type: Option<String>,
     /// Create a package with the specified group.
     #[arg(short = 'g', long, value_name = "group_name")]
     pub group: Option<String>,
+    /// Bundle name for generated projects (defaults to com.example.<name>).
+    #[arg(long = "bundle-name", value_name = "bundle_name")]
+    pub bundle_name: Option<String>,
+    /// SDK/API version for generated projects, e.g. "5.0.0(12)", "20", or
+    /// "26.0.0" (defaults to 5.0.0(12)).
+    #[arg(long = "api-version", value_name = "version")]
+    pub api_version: Option<String>,
+    /// Directory to create the files in (defaults to the current directory).
+    #[arg(short = 'p', long = "path", value_name = "directory")]
+    pub path: Option<std::path::PathBuf>,
+    /// Accept defaults without prompting.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Overwrite files that already exist.
+    #[arg(short = 'f', long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug, Clone)]
