@@ -43,7 +43,7 @@ Commands:
   clean       Remove installed modules and lockfiles
   publish     Publish a package to the registry
   prepublish  Pre-verify package content without publishing
-  init        Create an oh-package.json5 file
+  init        Create an oh-package.json5 file or a HarmonyOS project
   config      Manage the ohpm configuration file
   login       Log in with a private key and store the access token
   unpublish   Unpublish a package from the registry
@@ -55,6 +55,58 @@ Commands:
   version     Bump the package version
   cache       Manage the ohpm cache folder
 ```
+
+## Creating packages and projects (`init`)
+
+`ohpm-rs init` writes an `oh-package.json5` by default and can scaffold a
+standard stage-model project in the layout DevEco Studio creates:
+
+| `--type`            | Creates                                                                                         |
+| ------------------- | ----------------------------------------------------------------------------------------------- |
+| `package` (default) | `oh-package.json5` only (the reference `ohpm init` behavior)                                    |
+| `project`           | Application project: root `AppScope`/`hvigor` files plus the `entry` HAP module (Empty Ability) |
+| `har`               | Static library project: an HAR module plus the project root                                     |
+| `hsp`               | Shared library project: an HSP module plus the project root                                     |
+
+Running `ohpm-rs init` in a terminal without `--type` opens a small TUI that
+asks for the template, name, scope/bundle name, SDK version, and output
+directory. Scripts and `-y` never prompt: with no `--type` they get the legacy
+`oh-package.json5`.
+
+```sh
+# oh-package.json5 in the current directory
+ohpm-rs init -y
+
+# Scoped package manifest
+ohpm-rs init -y -g example
+
+# Application project with an entry module
+ohpm-rs init -y --type project --api-version 20 MyApp
+
+# Static / shared library project
+ohpm-rs init -y --type har @example/my-lib
+ohpm-rs init -y --type hsp @example/shared-lib --path ./packages/shared
+```
+
+Flags:
+
+- `name` — package/module/project name; defaults to the current directory.
+- `-g/--group <scope>` — wraps the name as `@scope/name` (package, har, hsp).
+- `--bundle-name <bundle>` — application bundle name (defaults to
+  `com.example.<name>`); accepted for har/hsp as well.
+- `--api-version <version>` — `5.0.0(12)` (default), `20`, `26.0.0`, or any
+  `x.y.z(N)` SDK string. It drives `targetSdkVersion`/`compatibleSdkVersion`,
+  `modelVersion`, the `@ohos/hypium` version, and API-specific template paths.
+- `-p/--path <dir>` — output directory (created if missing); defaults to the
+  current directory.
+- `-f/--force` — overwrite files from an earlier scaffold. Without it, any
+  existing generated file aborts before anything is written.
+
+The `har`/`hsp` project root contains a single module named after the unscoped
+package (`my-lib` → `my_lib`) and is wired into the root `build-profile.json5`.
+The `project` type creates the `entry` module. All templates use the stage
+model and ArkTS, with generated placeholder icons, so `ohpm-rs install` and a
+DevEco/hvigor build can run directly in the new directory.
 
 ## Running scripts
 
