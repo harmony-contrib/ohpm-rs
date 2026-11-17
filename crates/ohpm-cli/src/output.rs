@@ -1,4 +1,6 @@
-//! Console output helpers (`PrintUtil`).
+//! Console output helpers (`PrintUtil`), styled with owo-colors.
+
+use owo_colors::OwoColorize;
 
 /// Print a plain line to stdout.
 pub fn output(msg: &str) {
@@ -7,10 +9,10 @@ pub fn output(msg: &str) {
 
 /// Print a success message (green).
 pub fn succeed(msg: &str) {
-    println!("\x1b[32m{msg}\x1b[39m");
+    println!("{}", msg.green());
 }
 
 /// Print a warning to stderr (yellow).
 pub fn warn(msg: &str) {
-    eprintln!("\x1b[33mohpm warn: {msg}\x1b[0m");
+    eprintln!("{}", format!("ohpm warn: {msg}").yellow());
 }

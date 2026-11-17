@@ -44,6 +44,10 @@ name = "ohpm-core"
 changelog_path = "crates/ohpm-core/CHANGELOG.md"
 
 [[package]]
+name = "ohpm-native"
+changelog_path = "crates/ohpm-native/CHANGELOG.md"
+
+[[package]]
 name = "ohpm-cli"
 changelog_path = "crates/ohpm-cli/CHANGELOG.md"
-changelog_include = ["ohpm-core"]
+changelog_include = ["ohpm-core", "ohpm-native"]

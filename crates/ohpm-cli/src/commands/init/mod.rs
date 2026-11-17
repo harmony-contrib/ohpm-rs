@@ -29,6 +29,10 @@ pub async fn run(args: &InitArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let _config = load_config()?;
 
+    if args.project_type.as_deref() == Some("native") {
+        return run_native(args, &cwd);
+    }
+
     let requested = args
         .project_type
         .as_deref()
@@ -50,6 +54,27 @@ pub async fn run(args: &InitArgs) -> Result<()> {
         &cwd,
         requested.unwrap_or(InitKind::Package),
     )?)
+}
+
+/// `--type native`: scaffold a Rust N-API module project (the ohrs `init`).
+fn run_native(args: &InitArgs, cwd: &Path) -> Result<()> {
+    if args.group.is_some() || args.bundle_name.is_some() || args.api_version.is_some() {
+        bail!("--group, --bundle-name, and --api-version do not apply to --type native.");
+    }
+    let base = match &args.path {
+        Some(path) if path.is_absolute() => path.clone(),
+        Some(path) => cwd.join(path),
+        None => cwd.to_path_buf(),
+    };
+    let name = args.name.clone().unwrap_or_else(|| directory_name(cwd));
+    let target = base.join(&name);
+    ohpm_native::init::init(ohpm_native::InitArgs {
+        package_name: args.package.clone(),
+        name,
+        base,
+    })?;
+    output::output(&format!("Created native project in {}", target.display()));
+    Ok(())
 }
 
 /// Build the options for the flag-driven path.

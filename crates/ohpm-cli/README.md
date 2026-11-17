@@ -3,7 +3,8 @@
 The `ohpm-rs` binary: an ohpm (OpenHarmony package manager) CLI reimplemented
 in Rust. Headline capability: `publish` authenticates entirely from
 environment variables — no TUI prompts — plus workspace mode
-(`ohpm-workspace.yaml`), pre-release versioning, and HAR packaging.
+(`ohpm-workspace.yaml`), pre-release versioning, HAR packaging, and the native
+`build`/`artifact`/`cargo`/`doctor` commands ported from `cargo-ohrs`.
 
 Install a prebuilt release with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
 

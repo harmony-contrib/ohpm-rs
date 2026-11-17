@@ -54,6 +54,10 @@ Commands:
   run         Run a script defined in oh-package.json5
   version     Bump the package version
   cache       Manage the ohpm cache folder
+  build       Build an OHOS native module (cargo-ohrs build)
+  artifact    Generate an ohpm .har file from build artifacts
+  cargo       Run a cargo command inside the OHOS environment
+  doctor      Verify the native development environment
 ```
 
 ## Creating packages and projects (`init`)
@@ -67,6 +71,7 @@ standard stage-model project in the layout DevEco Studio creates:
 | `project`           | Application project: root `AppScope`/`hvigor` files plus the `entry` HAP module (Empty Ability) |
 | `har`               | Static library project: an HAR module plus the project root                                     |
 | `hsp`               | Shared library project: an HSP module plus the project root                                     |
+| `native`            | Rust N-API module project (cargo-ohrs init); `--package` also creates a HAR wrapper             |
 
 Running `ohpm-rs init` in a terminal without `--type` opens a small TUI that
 asks for the template, name, scope/bundle name, SDK version, and output
@@ -86,6 +91,9 @@ ohpm-rs init -y --type project --api-version 20 MyApp
 # Static / shared library project
 ohpm-rs init -y --type har @example/my-lib
 ohpm-rs init -y --type hsp @example/shared-lib --path ./packages/shared
+
+# Rust N-API module with an ohpm package wrapper (native; non-interactive)
+ohpm-rs init --type native --package @example/native-demo native-demo
 ```
 
 Flags:
@@ -101,6 +109,9 @@ Flags:
   current directory.
 - `-f/--force` — overwrite files from an earlier scaffold. Without it, any
   existing generated file aborts before anything is written.
+- `--package <name>` — ohpm package name for `--type native`; when set, the
+  generated Rust project also gets a `package/` HAR wrapper. `native` is
+  non-interactive and is not offered by the TUI.
 
 The `har`/`hsp` project root contains a single module named after the unscoped
 package (`my-lib` → `my_lib`) and is wired into the root `build-profile.json5`.
@@ -166,9 +177,53 @@ the first runtime failure stops the remaining packages. The workspace root
 does not need an `oh-package.json5` and runs only if listed as a member.
 Typo suggestions in workspace mode use only the selected members' scripts.
 
+## Native builds (`ohrs` compatibility)
+
+The `cargo-ohrs` CLI from the `ohos-rs` project is available as native
+`ohpm-rs` subcommands:
+
+| Command            | Purpose                                                                 |
+| ------------------ | ----------------------------------------------------------------------- |
+| `init --type native` | Scaffold a Rust N-API module (`--package` also creates the HAR wrapper) |
+| `build`            | Cross-compile a Rust crate to `.so` and generate `index.d.ts`           |
+| `artifact`         | Package build products into an ohpm `.har`                              |
+| `cargo`            | Run an arbitrary cargo command with the OHOS environment                |
+| `doctor`           | Check SDK discovery, Rust version, and installed rustup targets         |
+
+SDK discovery accepts the layouts produced by
+[`openharmony-rs/setup-ohos-sdk`](https://github.com/openharmony-rs/setup-ohos-sdk)
+and DevEco Studio:
+
+1. `--sdk-native <dir>` on `build`/`cargo` (explicit override)
+2. `OHOS_SDK_NATIVE` — the `native` directory exported by `setup-ohos-sdk`
+3. `OHOS_NDK_HOME` — an SDK root containing `native` (DevEco default)
+4. `OHOS_BASE_SDK_HOME` / `DEVECO_SDK_HOME` — scanned for `native` and API-version subdirectories
+5. `HOS_NDK_HOME` — HarmonyOS SDK root
+
+HarmonyOS (`hms`) headers and libraries are picked from the `hms` sibling of the
+OpenHarmony SDK, or from `HOS_NDK_HOME` when set. Without an HMS SDK the build
+uses the OpenHarmony toolchain, as `cargo-ohrs` did.
+
+```sh
+# Rust N-API module with an ohpm package wrapper
+ohpm-rs init --type native --package @demo/native native-demo
+
+# Cross-compile and package
+ohpm-rs build --arch arm64 --release
+ohpm-rs artifact --name native
+
+# Arbitrary cargo command in the OHOS environment (use `--` before cargo args)
+ohpm-rs cargo -- build --release
+
+ohpm-rs doctor
+```
+
+The CLI itself uses `bpaf` and `owo-colors` (migrated from `clap`), matching
+the `ohrs` implementation.
+
 ## Architecture
 
-A cargo workspace with two crates:
+A cargo workspace with three crates:
 
 - **`crates/ohpm-core`** — library: configuration (`.ohpmrc` + env overrides),
   package manifest/archive handling, integrity hashing (sha1 + sha512 in ssri
@@ -220,8 +275,12 @@ pnpm/pacquet:
   resolves against `ohpm-workspace.yaml` members as links; the publish flow
   rewrites them to versions (`^`/`~` prefixes kept, alias form becomes
   `ohpm:<member>@<version>`).
-- **`crates/ohpm-cli`** — the `ohpm-rs` binary: clap command definitions and thin
-  command handlers.
+- **`crates/ohpm-native`** — native build support ported from `cargo-ohrs`:
+  SDK discovery (including the `setup-ohos-sdk` `native` layout), the
+  cross-compilation environment, N-API `.so` builds, `index.d.ts` generation,
+  `.har` packaging, native project scaffolding, and `doctor`.
+- **`crates/ohpm-cli`** — the `ohpm-rs` binary: `bpaf` command definitions and
+  thin command handlers.
 
 Reference layout: the ohpm source in `lib/` of the DevEco Studio 6.1.1.280
 installation (`config/`, `core/registry/`, `core/publish/`, `core/package/`).

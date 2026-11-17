@@ -6,22 +6,30 @@ mod logger;
 pub mod output;
 
 use anyhow::Result;
-use clap::Parser;
+use owo_colors::OwoColorize;
 
-use cli::{Cli, Command};
+use cli::Command;
 
 #[tokio::main]
 async fn main() {
     logger::init();
-    let cli = Cli::parse();
-    if let Err(e) = run(cli).await {
-        eprintln!("\x1b[31mohpm error: {e:#}\x1b[0m");
+    let command = cli::cli().run();
+    if let Err(message) = cli::validate(&command) {
+        eprintln!("{}", format!("ohpm error: {message}").red());
+        std::process::exit(2);
+    }
+    if let Err(e) = run(command).await {
+        eprintln!("{}", format!("ohpm error: {e:#}").red());
         std::process::exit(1);
     }
 }
 
-async fn run(cli: Cli) -> Result<()> {
-    match cli.command {
+async fn run(command: Command) -> Result<()> {
+    match command {
+        Command::PrintVersion => {
+            println!("ohpm-rs {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Command::Publish(args) => commands::publish::run(&args).await,
         Command::Prepublish(args) => commands::prepublish::run(&args).await,
         Command::Pack(args) => commands::pack::run(&args).await,
@@ -40,5 +48,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Update(args) => commands::update::run(&args).await,
         Command::Uninstall(args) => commands::uninstall::run(&args).await,
         Command::Run(args) => commands::run::run(&args).await,
+        Command::Build(args) => ohpm_native::build::build(args),
+        Command::Artifact(args) => ohpm_native::artifact::artifact(args),
+        Command::Cargo(args) => ohpm_native::cargo::cargo(args),
+        Command::Doctor => ohpm_native::doctor::doctor(),
     }
 }
