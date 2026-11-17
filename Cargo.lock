@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "ohpm-cli"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "bpaf",
@@ -2202,7 +2202,7 @@ dependencies = [
 
 [[package]]
 name = "ohpm-core"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "aes",
  "axum",
@@ -2243,7 +2243,7 @@ dependencies = [
 
 [[package]]
 name = "ohpm-native"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "cargo_metadata",
