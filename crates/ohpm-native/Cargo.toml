@@ -1,0 +1,26 @@
+[package]
+name = "ohpm-native"
+version.workspace = true
+edition.workspace = true
+license-file = "LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "Native OpenHarmony build support for ohpm-rs (port of cargo-ohrs)"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+flate2.workspace = true
+tar.workspace = true
+sha2.workspace = true
+cargo_metadata.workspace = true
+fs_extra.workspace = true
+semver.workspace = true
+version-compare.workspace = true
+whoami.workspace = true
+owo-colors.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,7 +1,9 @@
 //! Minimal console logger honoring the ohpm `log_level` config
-//! (`error | warn | info | debug`).
+//! (`error | warn | info | debug`), styled with owo-colors.
 
 use std::sync::atomic::{AtomicU8, Ordering};
+
+use owo_colors::OwoColorize;
 
 /// Levels ordered 0..3 to match `DefaultConfig.logLevelType`.
 const LEVEL_ERROR: u8 = 0;
@@ -26,15 +28,22 @@ impl log::Log for ConsoleLogger {
             log::Level::Debug | log::Level::Trace => LEVEL_DEBUG,
         };
         if bits <= CURRENT.load(Ordering::Relaxed) {
-            // `Log4js` — `ohpm {LEVEL}: {message}` with the level colors
-            // (warn yellow, error red, debug grey, info plain).
-            let (level, color) = match record.level() {
-                log::Level::Error => ("ERROR", "\x1b[31m"),
-                log::Level::Warn => ("WARN", "\x1b[33m"),
-                log::Level::Debug | log::Level::Trace => ("DEBUG", "\x1b[90m"),
-                log::Level::Info => ("INFO", ""),
-            };
-            eprintln!("{color}ohpm {level}: {}\x1b[39m", record.args());
+            // `Log4js` — `ohpm {LEVEL}: {message}` with the level colors.
+            match record.level() {
+                log::Level::Error => {
+                    eprintln!("{}", format!("ohpm ERROR: {}", record.args()).red())
+                }
+                log::Level::Warn => {
+                    eprintln!("{}", format!("ohpm WARN: {}", record.args()).yellow())
+                }
+                log::Level::Debug | log::Level::Trace => {
+                    eprintln!(
+                        "{}",
+                        format!("ohpm DEBUG: {}", record.args()).bright_black()
+                    )
+                }
+                log::Level::Info => eprintln!("ohpm INFO: {}", record.args()),
+            }
         }
     }
 
